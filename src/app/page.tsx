@@ -314,10 +314,10 @@ export default function Home() {
       );
       const nextProducts = productRows.map((product) => ({
         ...product,
-        purchase_cost: Number(product.purchase_cost),
-        sale_price: Number(product.sale_price),
-        minimum_stock: Number(product.minimum_stock),
-        stock: Number((stockByProduct.get(product.id) || 0).toFixed(3))
+        purchase_cost: Number(product.average_cost ?? product.purchase_cost ?? 0),
+        sale_price: Number(product.default_sale_price ?? product.sale_price ?? 0),
+        minimum_stock: Number(product.low_stock_threshold ?? product.minimum_stock ?? 10),
+        stock: Number((product.current_stock ?? stockByProduct.get(product.id) ?? 0))
       }));
       const items = itemRows;
       setProducts(nextProducts);
@@ -458,18 +458,18 @@ export default function Home() {
     if (productFilter === 'LOW_STOCK') return product.active && product.stock <= product.minimum_stock;
     return true;
   });
-  const returnSales = sales.filter((sale) => sale.status === 'CONFIRMED');
+  const returnSales = sales.filter((sale) => ['COMPLETED', 'PARTIALLY_RETURNED', 'CONFIRMED'].includes(sale.status));
   const selectedReturnSale = returnSales.find((sale) => sale.id === returnForm.saleId);
   const selectedReturnItem = selectedReturnSale?.items.find(
     (item) => item.product_id === returnForm.productId
   );
   const todaySales = sales.filter(
-    (sale) => sale.sale_date === today() && sale.status === 'CONFIRMED'
+    (sale) => sale.sale_date === today() && sale.status !== 'VOIDED'
   );
-  const todayRefunds = returns.filter((row) => row.movement_date === today());
+  const todayRefunds = returns.filter((row) => (row.movement_date || (row as unknown as { return_date?: string }).return_date) === today());
   const todayNetSales = roundMoney(
     todaySales.reduce((sum, sale) => sum + sale.net_total, 0) -
-      todayRefunds.reduce((sum, row) => sum + row.refund_amount, 0)
+      todayRefunds.reduce((sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0), 0)
   );
   const todayProfit = roundMoney(
     todaySales.reduce(
@@ -482,7 +482,7 @@ export default function Home() {
       0
     ) -
       todayRefunds.reduce(
-        (sum, row) => sum + row.refund_amount - (row.restock ? row.cost_amount_snapshot : 0),
+        (sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0) - (row.restock ? (row.cost_amount_snapshot ?? 0) : 0),
         0
       )
   );
@@ -493,27 +493,28 @@ export default function Home() {
     (product) => product.active && product.stock <= product.minimum_stock
   );
   const reportSales = sales.filter(
-    (sale) => sale.sale_date >= reportStart && sale.sale_date <= reportEnd
+    (sale) => sale.sale_date >= reportStart && sale.sale_date <= reportEnd && sale.status !== 'VOIDED'
   );
   const reportReturns = returns.filter(
-    (row) => row.movement_date >= reportStart && row.movement_date <= reportEnd
+    (row) => {
+      const d = row.movement_date || (row as unknown as { return_date?: string }).return_date;
+      return d && d >= reportStart && d <= reportEnd;
+    }
   );
   const reportNet = roundMoney(
     reportSales
-      .filter((sale) => sale.status === 'CONFIRMED')
       .reduce((sum, sale) => sum + sale.net_total, 0) -
-      reportReturns.reduce((sum, row) => sum + row.refund_amount, 0)
+      reportReturns.reduce((sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0), 0)
   );
   const reportProfit = roundMoney(
     reportSales
-      .filter((sale) => sale.status === 'CONFIRMED')
       .reduce(
         (sum, sale) =>
           sum + sale.items.reduce((n, item) => n + item.line_total - item.cost_total_snapshot, 0),
         0
       ) -
       reportReturns.reduce(
-        (sum, row) => sum + row.refund_amount - (row.restock ? row.cost_amount_snapshot : 0),
+        (sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0) - (row.restock ? (row.cost_amount_snapshot ?? 0) : 0),
         0
       )
   );
@@ -729,19 +730,18 @@ export default function Home() {
     if (!supabase) return;
     try {
       const qty = quantity(returnForm.quantity);
+      if (!returnForm.saleId) throw new Error('Please select the original sales bill to return items from.');
       if (!returnForm.productId) throw new Error('Choose a product to return.');
       const selectedProduct = products.find((product) => product.id === returnForm.productId);
       const saved = await runAction(async () => {
         const { data, error: rpcError } = await supabase.rpc('create_return', {
           p_date: returnForm.date,
           p_reason: returnForm.reason,
-          p_sale_id: returnForm.saleId || null,
+          p_sale_id: returnForm.saleId,
           p_items: [
             {
               productId: returnForm.productId,
-              quantity: qty,
-              restock: returnForm.restock,
-              ...(!returnForm.saleId ? { refundAmount: Number(returnForm.refund) } : {})
+              quantity: qty
             }
           ],
           p_notes: null
