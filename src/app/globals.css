@@ -272,6 +272,7 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 4px; 
 .receipt-notes { margin: 1.5mm 0; font-size: 8px; overflow-wrap: anywhere; }
 .receipt-footer { margin-top: 2mm; text-align: center; font-size: 8px; overflow-wrap: anywhere; }
 @media print {
+  @page { size: 80mm auto; margin: 0; }
   html,body { width: 80mm !important; min-width: 80mm !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; background: white !important; }
   body > :not(.receipt-overlay) { display: none !important; }
   .receipt-overlay { position: static !important; inset: auto !important; display: block !important; width: 80mm !important; height: auto !important; min-height: 0 !important; margin: 0 !important; padding: 0 !important; overflow: visible !important; background: white !important; }

@@ -283,7 +283,7 @@ export default function Home() {
               .order('created_at', { ascending: false })
               .range(from, to)
           ),
-          fetchAllRows((from, to) => supabase.from('sale_items').select('*').range(from, to)),
+          fetchAllRows((from, to) => supabase.from('sale_items').select('*').order('id').range(from, to)),
           fetchAllRows((from, to) =>
             supabase
               .from('returns')
@@ -299,7 +299,7 @@ export default function Home() {
               .range(from, to)
           ),
           fetchAllRows((from, to) =>
-            supabase.from('stock_movements').select('product_id,quantity').range(from, to)
+            supabase.from('stock_movements').select('product_id,quantity').order('id').range(from, to)
           ),
           supabase.from('business_settings').select('*').maybeSingle()
         ]);
@@ -841,17 +841,17 @@ export default function Home() {
     try {
       const [settingsBackup, productBackup, stockBackup, adjustmentBackup, invoiceBackup, returnSequenceBackup, salesBackup, itemsBackup, returnsBackup, loansBackup, settlementsBackup, auditBackup] = await Promise.all([
         supabase.from('business_settings').select('*').maybeSingle(),
-        fetchAllRows((from, to) => supabase.from('products').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('stock_movements').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('stock_adjustments').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('invoice_sequences').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('return_sequences').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('sales').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('sale_items').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('returns').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('loans').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('loan_settlements').select('*').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('audit_log').select('*').range(from, to))
+        fetchAllRows((from, to) => supabase.from('products').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('stock_movements').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('stock_adjustments').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('invoice_sequences').select('*').order('year').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('return_sequences').select('*').order('year').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('sales').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('sale_items').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('returns').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('loans').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('loan_settlements').select('*').order('id').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('audit_log').select('*').order('id').range(from, to))
       ]);
       if (settingsBackup.error) throw new Error(settingsBackup.error.message);
       const backup = {
@@ -905,21 +905,60 @@ export default function Home() {
 
   function exportReport() {
     if (reportStart > reportEnd) return;
-    const rows = [
-      ['Invoice', 'Date', 'Total', 'Status'],
-      ...reportSales.map((sale) => [
+    const saleRows = reportSales.map((sale) => {
+      const saleRefunds = returns
+        .filter((r) => r.sale_id === sale.id)
+        .reduce((sum, r) => sum + r.refund_amount, 0);
+      const netBill = Math.max(0, sale.net_total - saleRefunds);
+      const saleProfit = sale.items.reduce(
+        (sum, item) => sum + item.line_total - item.cost_total_snapshot,
+        0
+      );
+      return [
         sale.invoice_number,
         sale.sale_date,
+        String(sale.items.length),
         sale.net_total.toFixed(2),
+        saleRefunds.toFixed(2),
+        netBill.toFixed(2),
+        saleProfit.toFixed(2),
         sale.status
-      ])
+      ];
+    });
+
+    const returnSectionRows = reportReturns.map((ret) => [
+      ret.bill_number,
+      ret.invoice_number || 'Unlinked',
+      ret.product_name_snapshot,
+      ret.movement_date,
+      ret.quantity.toString(),
+      ret.refund_amount.toFixed(2),
+      ret.restock ? 'Restocked' : 'Damaged / Discarded',
+      ret.reason
+    ]);
+
+    const rows = [
+      ['SALES INVOICES', `Period: ${reportStart} to ${reportEnd}`],
+      ['Invoice', 'Date', 'Items Count', 'Original Total (Rs.)', 'Refunds (Rs.)', 'Net Bill (Rs.)', 'Gross Profit (Rs.)', 'Status'],
+      ...saleRows,
+      [],
+      ['CUSTOMER RETURNS', `Period: ${reportStart} to ${reportEnd}`],
+      ['Return Bill', 'Original Invoice', 'Product', 'Date', 'Quantity', 'Refund Amount (Rs.)', 'Condition', 'Reason'],
+      ...returnSectionRows,
+      [],
+      ['PERIOD SUMMARY'],
+      ['Total Sales (Rs.)', reportSales.filter((s) => s.status === 'CONFIRMED').reduce((sum, s) => sum + s.net_total, 0).toFixed(2)],
+      ['Total Customer Refunds (Rs.)', reportReturns.reduce((sum, r) => sum + r.refund_amount, 0).toFixed(2)],
+      ['Net Sales (Rs.)', reportNet.toFixed(2)],
+      ['Trading Profit (Rs.)', reportProfit.toFixed(2)]
     ];
+
     const csv = rows
       .map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','))
       .join('\r\n');
     const link = document.createElement('a');
     link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-    link.download = `Sales_Report_${reportStart}_${reportEnd}.csv`;
+    link.download = `Shop_Report_${reportStart}_${reportEnd}.csv`;
     link.click();
     URL.revokeObjectURL(link.href);
   }
@@ -1134,7 +1173,7 @@ export default function Home() {
                       </button>
                     }
                   />
-                  <SalesTable sales={sales.slice(0, 7)} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
+                  <SalesTable sales={sales.slice(0, 7)} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
                 </section>
                 <section className="surface stock-watch">
                   <SectionHead
@@ -1379,7 +1418,7 @@ export default function Home() {
               </aside>
               <section className="surface span-all">
                 <SectionHead title="Sales book" eyebrow="LATEST 300 BILLS" />
-                <SalesTable sales={sales} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
+                <SalesTable sales={sales} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
               </section>
             </div>
           )}
@@ -1751,6 +1790,7 @@ export default function Home() {
                       <input
                         type="date"
                         value={returnForm.date}
+                        min={selectedReturnSale ? selectedReturnSale.sale_date : undefined}
                         onChange={(event) =>
                           setReturnForm({ ...returnForm, date: event.target.value })
                         }
@@ -2111,6 +2151,7 @@ export default function Home() {
                   sales={reportSales.filter((sale) =>
                     sale.invoice_number.toLowerCase().includes(search.toLowerCase())
                   )}
+                  returns={returns}
                   onPrint={(sale) => setReceipt(saleReceipt(sale))}
                 />
               </div>
@@ -2372,7 +2413,15 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
-function SalesTable({ sales, onPrint }: { sales: Sale[]; onPrint?: (sale: Sale) => void }) {
+function SalesTable({
+  sales,
+  returns = [],
+  onPrint
+}: {
+  sales: Sale[];
+  returns?: ReturnRow[];
+  onPrint?: (sale: Sale) => void;
+}) {
   return sales.length ? (
     <div className="table-wrap">
       <table>
@@ -2382,43 +2431,76 @@ function SalesTable({ sales, onPrint }: { sales: Sale[]; onPrint?: (sale: Sale) 
             <th>Date</th>
             <th>Items</th>
             <th>Status</th>
-            <th className="align-right">Original total</th>
+            <th className="align-right">Net bill</th>
             <th className="print-column">Receipt</th>
           </tr>
         </thead>
         <tbody>
-          {sales.map((sale) => (
-            <tr key={sale.id}>
-              <td>
-                <b className="invoice-number">{sale.invoice_number}</b>
-              </td>
-              <td>{sale.sale_date}</td>
-              <td>
-                {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
-                <small>
-                  {sale.items
-                    .slice(0, 2)
-                    .map((item) => item.product_name_snapshot)
-                    .join(', ')}
-                </small>
-              </td>
-              <td>
-                <span
-                  className={`pill ${sale.status === 'CONFIRMED' ? 'pill-green' : 'pill-rust'}`}
-                >
-                  {sale.status === 'CONFIRMED' ? 'Confirmed' : 'Cancelled'}
-                </span>
-              </td>
-              <td className="align-right numeric">{formatMoney(sale.net_total)}</td>
-              <td className="print-column">
-                {onPrint && (
-                  <button className="icon-button" type="button" title={`Print ${sale.invoice_number}`} aria-label={`Print ${sale.invoice_number}`} onClick={() => onPrint(sale)}>
-                    <Printer size={15} />
-                  </button>
-                )}
-              </td>
-            </tr>
-          ))}
+          {sales.map((sale) => {
+            const saleReturns = returns.filter((r) => r.sale_id === sale.id);
+            const refundedAmount = saleReturns.reduce((sum, r) => sum + r.refund_amount, 0);
+            const netBill = roundMoney(Math.max(0, sale.net_total - refundedAmount));
+            const isFullyReturned = refundedAmount >= sale.net_total && sale.net_total > 0;
+            const isPartialReturn = refundedAmount > 0 && !isFullyReturned;
+            const statusLabel =
+              sale.status === 'VOIDED'
+                ? 'Cancelled'
+                : isFullyReturned
+                  ? 'Fully returned'
+                  : isPartialReturn
+                    ? 'Partial return'
+                    : 'Confirmed';
+            const statusClass =
+              sale.status === 'VOIDED'
+                ? 'pill-rust'
+                : isFullyReturned
+                  ? 'pill-rust'
+                  : isPartialReturn
+                    ? 'pill-gold'
+                    : 'pill-green';
+
+            return (
+              <tr key={sale.id}>
+                <td>
+                  <b className="invoice-number">{sale.invoice_number}</b>
+                </td>
+                <td>{sale.sale_date}</td>
+                <td>
+                  {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
+                  <small>
+                    {sale.items
+                      .slice(0, 2)
+                      .map((item) => item.product_name_snapshot)
+                      .join(', ')}
+                  </small>
+                </td>
+                <td>
+                  <span className={`pill ${statusClass}`}>{statusLabel}</span>
+                </td>
+                <td className="align-right numeric">
+                  <b>{formatMoney(netBill)}</b>
+                  {refundedAmount > 0 && (
+                    <small style={{ color: 'var(--rust)', display: 'block', fontSize: '10px' }}>
+                      −{formatMoney(refundedAmount)} returned
+                    </small>
+                  )}
+                </td>
+                <td className="print-column">
+                  {onPrint && (
+                    <button
+                      className="icon-button"
+                      type="button"
+                      title={`Print ${sale.invoice_number}`}
+                      aria-label={`Print ${sale.invoice_number}`}
+                      onClick={() => onPrint(sale)}
+                    >
+                      <Printer size={15} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -2540,14 +2622,15 @@ function ReceiptPreview({
     <div className="receipt-overlay" role="dialog" aria-modal="true" aria-label="Receipt preview">
       <div className="receipt-controls">
         <div>
-          <p className="eyebrow">80 MM THERMAL RECEIPT PDF</p>
+          <p className="eyebrow">80 MM THERMAL RECEIPT</p>
           <strong>{receipt.number}</strong>
-          <small className="receipt-print-instructions">Save this vector PDF, then print from your PDF viewer at 100% on continuous 80 mm paper.</small>
+          <small className="receipt-print-instructions">Formatted for 80 mm thermal roll paper. Print directly with no margins, or download the vector PDF.</small>
         </div>
         <div className="receipt-control-actions">
           <button className="button secondary" type="button" onClick={onClose}>Close</button>
+          <button className="button primary" type="button" onClick={() => window.print()}><Printer size={15} /> Print bill (80mm)</button>
           <button className="button secondary" type="button" onClick={() => deliverReceiptPdf(false)}><ArrowDownToLine size={15} /> Save PDF</button>
-          <button className="button primary" type="button" onClick={() => deliverReceiptPdf(true)}><Printer size={15} /> Open PDF to print</button>
+          <button className="button secondary" type="button" onClick={() => deliverReceiptPdf(true)}>Open PDF</button>
         </div>
       </div>
       {deliveryError && <p className="receipt-delivery-error" role="alert">{deliveryError}</p>}

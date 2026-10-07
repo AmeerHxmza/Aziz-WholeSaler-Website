@@ -329,7 +329,7 @@ begin
   if p_purchase_cost < 0 or p_purchase_cost > 1000000000 or p_purchase_cost <> round(p_purchase_cost,2) then raise exception 'Buying rate must have at most 2 decimals.'; end if;
   if p_movement_type not in ('OPENING','PURCHASE') then raise exception 'Invalid stock movement type.'; end if;
   select coalesce(sum(quantity),0) into v_stock from public.stock_movements where owner_id=v_owner and product_id=p_product_id;
-  v_cost := round(((v_stock*v_product.purchase_cost)+(p_quantity*p_purchase_cost))/(v_stock+p_quantity),6);
+  v_cost := case when v_stock <= 0 then p_purchase_cost else round(((v_stock*v_product.purchase_cost)+(p_quantity*p_purchase_cost))/(v_stock+p_quantity),6) end;
   update public.products set purchase_cost=v_cost,updated_at=now() where id=p_product_id;
   v_ref := coalesce(
     nullif(trim(p_reference), ''),
@@ -382,7 +382,7 @@ begin
     values(v_owner,v_bill,v_bill,p_sale_id,case when p_sale_id is not null then v_sale.invoice_number else null end,v_product.id,v_product.name,v_product.unit,v_qty,v_refund,v_product.purchase_cost,v_cost,v_restock,trim(p_reason),p_date,nullif(trim(coalesce(p_notes,'')),'')) returning id into v_rec_id;
     if v_restock then
       select coalesce(sum(quantity),0) into v_stock from public.stock_movements where owner_id=v_owner and product_id=v_product.id;
-      update public.products set purchase_cost=round(((v_stock*purchase_cost)+(v_qty*v_product.purchase_cost))/(v_stock+v_qty),6),updated_at=now() where id=v_product.id;
+      update public.products set purchase_cost=case when v_stock <= 0 then v_product.purchase_cost else round(((v_stock*purchase_cost)+(v_qty*v_product.purchase_cost))/(v_stock+v_qty),6) end,updated_at=now() where id=v_product.id;
       insert into public.stock_movements(owner_id,product_id,quantity,movement_type,reference_type,reference_id,movement_date,unit_cost,note)
       values(v_owner,v_product.id,v_qty,'RETURN','RETURN_RECORD',v_bill,p_date,v_product.purchase_cost,'Return: '||trim(p_reason));
     end if;
