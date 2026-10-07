@@ -426,10 +426,15 @@ export default function Home() {
 
       if (localLoansRecord?.value) {
         setLoans(localLoansRecord.value);
+      } else {
+        setLoans([]);
       }
       if (localSettingsRecord?.value) {
         setSettings(localSettingsRecord.value);
         setBusinessForm(localSettingsRecord.value);
+      } else {
+        setSettings(defaultSettings);
+        setBusinessForm(defaultSettings);
       }
     } catch (err) {
       console.warn('Error reading offline DB:', err);
@@ -1043,35 +1048,7 @@ export default function Home() {
       if (resetError) throw resetError;
 
       // Wipe local IndexedDB offline tables so client mirror is completely cleared
-      try {
-        await offlineDb.transaction('rw', [
-          offlineDb.products,
-          offlineDb.sales,
-          offlineDb.sale_items,
-          offlineDb.returns,
-          offlineDb.return_items,
-          offlineDb.stock_entries,
-          offlineDb.stock_entry_items,
-          offlineDb.inventory_movements,
-          offlineDb.sync_queue,
-          offlineDb.settings
-        ], async () => {
-          await Promise.all([
-            offlineDb.products.clear(),
-            offlineDb.sales.clear(),
-            offlineDb.sale_items.clear(),
-            offlineDb.returns.clear(),
-            offlineDb.return_items.clear(),
-            offlineDb.stock_entries.clear(),
-            offlineDb.stock_entry_items.clear(),
-            offlineDb.inventory_movements.clear(),
-            offlineDb.sync_queue.clear(),
-            offlineDb.settings.clear()
-          ]);
-        });
-      } catch (dbErr) {
-        console.warn('Local offline storage wipe error:', dbErr);
-      }
+      await syncEngine.clearLocalDatabase();
 
       setProducts([]);
       setSales([]);
@@ -2694,6 +2671,30 @@ export default function Home() {
                   }}
                 >
                   <ArrowDownToLine size={15} /> Export Local POS Database Backup (Offline)
+                </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={async () => {
+                    setBusy(true);
+                    setError('');
+                    try {
+                      await syncEngine.clearLocalDatabase();
+                      setProducts([]);
+                      setSales([]);
+                      setReturns([]);
+                      setLoans([]);
+                      await syncEngine.pullCloudState();
+                      await refreshFromOfflineDb();
+                      setMessage('Local browser storage cleared and resynced with cloud.');
+                    } catch (e) {
+                      setError(`Storage purge error: ${errorText(e)}`);
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  <RefreshCw size={15} /> Purge Local Offline Cache & Resync
                 </button>
                 <div className="reset-zone">
                   <p className="eyebrow">DESTRUCTIVE ACTION</p>

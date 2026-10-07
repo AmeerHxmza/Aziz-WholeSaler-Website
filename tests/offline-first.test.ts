@@ -9,6 +9,7 @@ import {
   createOfflineReturn,
   exportOfflineBackup
 } from '../src/lib/db/offline-operations';
+import { syncEngine } from '../src/lib/sync/sync-engine';
 
 test('Offline First POS: Complete lifecycle with zero network connectivity', async () => {
   // Clear offline database tables
@@ -137,3 +138,34 @@ test('Offline First POS: Complete lifecycle with zero network connectivity', asy
   assert.equal(backup.returns.length, 1, 'Backup should export 1 return');
   assert.equal(backup.sync_queue.length, 4, 'Backup should preserve 4 pending sync queue operations');
 });
+
+test('Offline Database Reset: clearLocalDatabase empties all stores immediately', async () => {
+  // Ensure data exists first
+  await saveOfflineProduct({
+    name: 'Test Reset Item',
+    unit: 'Kg',
+    purchaseCost: 50,
+    salePrice: 75,
+    minimumStock: 5,
+    openingStock: 10
+  });
+
+  const productsBefore = await offlineDb.products.count();
+  assert.ok(productsBefore > 0, 'Database should contain products before reset');
+
+  // Perform full clear
+  await syncEngine.clearLocalDatabase();
+
+  const [productsAfter, salesAfter, returnsAfter, queueAfter] = await Promise.all([
+    offlineDb.products.count(),
+    offlineDb.sales.count(),
+    offlineDb.returns.count(),
+    offlineDb.sync_queue.count()
+  ]);
+
+  assert.equal(productsAfter, 0, 'Products should be empty after clearLocalDatabase');
+  assert.equal(salesAfter, 0, 'Sales should be empty after clearLocalDatabase');
+  assert.equal(returnsAfter, 0, 'Returns should be empty after clearLocalDatabase');
+  assert.equal(queueAfter, 0, 'Sync queue should be empty after clearLocalDatabase');
+});
+
