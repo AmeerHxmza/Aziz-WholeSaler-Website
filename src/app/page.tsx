@@ -4,12 +4,15 @@ import { useEffect, useEffectEvent, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
+  AlertTriangle,
   ArrowDownToLine,
   ArrowLeftRight,
   Boxes,
   ChartNoAxesCombined,
+  CheckCircle2,
   CircleAlert,
   ClipboardList,
+  Clock,
   Coins,
   FileText,
   LayoutDashboard,
@@ -19,12 +22,23 @@ import {
   Plus,
   Printer,
   Power,
+  RefreshCw,
   Search,
   Settings2,
   ShoppingCart,
   Undo2,
+  Wifi,
+  WifiOff,
   X
 } from 'lucide-react';
+import { offlineDb } from '@/lib/db/offline-db';
+import {
+  createOfflineSale,
+  createOfflineReturn,
+  recordOfflineStock,
+  saveOfflineProduct
+} from '@/lib/db/offline-operations';
+import { syncEngine, type SyncStatusState } from '@/lib/sync/sync-engine';
 import {
   amount,
   formatMoney,
@@ -64,13 +78,14 @@ type Sale = {
   invoice_number: string;
   sale_date: string;
   net_total: number;
+  original_profit?: number;
   status: string;
   notes: string | null;
   created_at: string;
   items: SaleItem[];
 };
 type ReturnRow = {
-  id: number;
+  id: number | string;
   bill_number: string;
   sale_id: string | null;
   invoice_number: string | null;
@@ -176,8 +191,21 @@ function savedReturnReceipt(selected: ReturnRow, returns: ReturnRow[]): ReceiptR
   };
 }
 
-function errorText(error: unknown) {
-  return error instanceof Error ? error.message : 'The request could not be completed.';
+function errorText(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'object' && error !== null) {
+    if ('message' in error && typeof (error as { message: unknown }).message === 'string') {
+      return (error as { message: string }).message;
+    }
+    if ('error_description' in error && typeof (error as { error_description: unknown }).error_description === 'string') {
+      return (error as { error_description: string }).error_description;
+    }
+    if ('details' in error && typeof (error as { details: unknown }).details === 'string') {
+      return (error as { details: string }).details;
+    }
+  }
+  if (typeof error === 'string') return error;
+  return 'The request could not be completed.';
 }
 
 export default function Home() {
@@ -199,12 +227,18 @@ export default function Home() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [syncState, setSyncState] = useState<SyncStatusState>(syncEngine.getState());
   const [receipt, setReceipt] = useState<ReceiptRecord | null>(null);
   const [search, setSearch] = useState('');
   const [productFilter, setProductFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'LOW_STOCK'>('ALL');
   const [reportStart, setReportStart] = useState(today());
   const [reportEnd, setReportEnd] = useState(today());
   const [cart, setCart] = useState<CartLine[]>([{ productId: '', quantity: '1', unitPrice: '' }]);
+  const [saleCustomerName, setSaleCustomerName] = useState('');
+  const [saleCustomerPhone, setSaleCustomerPhone] = useState('');
+  const [quickStockProduct, setQuickStockProduct] = useState<Product | null>(null);
+  const [quickStockQty, setQuickStockQty] = useState('');
+  const [quickStockCost, setQuickStockCost] = useState('');
   const [newProduct, setNewProduct] = useState({
     name: '',
     unit: 'Box',
@@ -250,127 +284,175 @@ export default function Home() {
   const [resetPhrase, setResetPhrase] = useState('');
 
   useEffect(() => {
-    if (!supabase) return;
+    // 1. Immediately recover trusted POS installation from localStorage
+    try {
+      const trusted = localStorage.getItem('aziz_pos_trusted_device');
+      if (trusted) {
+        const parsed = JSON.parse(trusted);
+        if (parsed?.id) {
+          setSession({ id: parsed.id, email: parsed.email });
+          setAccountEmail(parsed.email || '');
+        }
+      }
+    } catch {}
+
+    const unsub = syncEngine.subscribe((state) => {
+      setSyncState(state);
+    });
+
+    void refreshFromOfflineDb().then(() => {
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
+    });
+
+    if (!supabase) return unsub;
+
     supabase.auth.getSession().then(({ data }) => {
       const user = data.session?.user;
       if (user) {
         setSession({ id: user.id, email: user.email });
         setAccountEmail(user.email || '');
+        localStorage.setItem(
+          'aziz_pos_trusted_device',
+          JSON.stringify({ id: user.id, email: user.email, trustedAt: new Date().toISOString() })
+        );
+      }
+    }).catch(() => {
+      // Offline: network error ignored, trusted device keeps working
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((event, authSession) => {
+      const user = authSession?.user;
+      if (user) {
+        setSession({ id: user.id, email: user.email });
+        setAccountEmail(user.email || '');
+        localStorage.setItem(
+          'aziz_pos_trusted_device',
+          JSON.stringify({ id: user.id, email: user.email, trustedAt: new Date().toISOString() })
+        );
+      } else if (event === 'SIGNED_OUT') {
+        localStorage.removeItem('aziz_pos_trusted_device');
+        setSession(null);
+        setAccountEmail('');
       }
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, authSession) => {
-      const user = authSession?.user;
-      setSession(user ? { id: user.id, email: user.email } : null);
-      setAccountEmail(user?.email || '');
-    });
-    return () => listener.subscription.unsubscribe();
+
+    return () => {
+      unsub();
+      listener.subscription.unsubscribe();
+    };
   }, [supabase]);
 
+  async function refreshFromOfflineDb() {
+    try {
+      const localProducts = await offlineDb.products.toArray();
+      const localSales = await offlineDb.sales.orderBy('created_at').reverse().toArray();
+      const localSaleItems = await offlineDb.sale_items.toArray();
+      const localReturns = await offlineDb.returns.orderBy('created_at').reverse().toArray();
+      const localReturnItems = await offlineDb.return_items.toArray();
+
+      const localLoansRecord = await offlineDb.settings.get('cloud_loans');
+      const localSettingsRecord = await offlineDb.settings.get('cloud_settings');
+
+      setProducts(
+        localProducts.map((p) => ({
+          id: p.id,
+          name: p.name,
+          unit: p.unit,
+          purchase_cost: Number(p.average_cost ?? p.purchase_cost ?? 0),
+          sale_price: Number(p.sale_price ?? 0),
+          minimum_stock: Number(p.minimum_stock ?? 10),
+          active: p.active,
+          stock: Number(p.current_stock ?? 0)
+        }))
+      );
+
+      setSales(
+        localSales.map((s) => {
+          const items = localSaleItems
+            .filter((si) => si.sale_id === s.id)
+            .map((si, idx) => ({
+              id: idx + 1,
+              sale_id: s.id,
+              product_id: si.product_id,
+              product_name_snapshot: si.product_name_snapshot,
+              unit_snapshot: si.unit_snapshot,
+              purchase_cost_snapshot: Number(si.unit_cost_snapshot || 0),
+              cost_total_snapshot: Number((si.unit_cost_snapshot || 0) * si.quantity),
+              quantity: Number(si.quantity),
+              unit_price: Number(si.unit_sale_price),
+              line_total: Number(si.line_total)
+            }));
+
+          return {
+            id: s.id,
+            invoice_number: s.invoice_number,
+            sale_date: s.sale_date,
+            customer_name: s.customer_name || null,
+            customer_phone: s.customer_phone || null,
+            subtotal: Number(s.subtotal),
+            total: Number(s.total),
+            net_total: Number(s.net_total),
+            original_profit: Number(s.original_profit || 0),
+            status: s.status,
+            notes: s.notes || null,
+            created_at: s.created_at,
+            items
+          };
+        })
+      );
+
+      setReturns(
+        localReturns.map((r) => {
+          const rItem = localReturnItems.find((ri) => ri.return_id === r.id);
+          const prod = localProducts.find((p) => p.id === rItem?.product_id);
+          const sale = localSales.find((s) => s.id === r.sale_id);
+          return {
+            id: r.id,
+            bill_number: r.return_number,
+            sale_id: r.sale_id,
+            invoice_number: r.invoice_number || sale?.invoice_number || null,
+            product_id: rItem?.product_id || '',
+            product_name_snapshot: prod?.name || 'Returned item',
+            unit_snapshot: prod?.unit || 'Units',
+            quantity: Number(rItem?.quantity_returned || 0),
+            refund_amount: Number(r.refund_total),
+            cost_amount_snapshot: Number(rItem ? (rItem.unit_cost_snapshot || 0) * rItem.quantity_returned : 0),
+            restock: true,
+            reason: r.reason || 'Customer return',
+            movement_date: r.return_date
+          };
+        })
+      );
+
+      if (localLoansRecord?.value) {
+        setLoans(localLoansRecord.value);
+      }
+      if (localSettingsRecord?.value) {
+        setSettings(localSettingsRecord.value);
+        setBusinessForm(localSettingsRecord.value);
+      }
+    } catch (err) {
+      console.warn('Error reading offline DB:', err);
+    }
+  }
+
   async function loadData() {
-    if (!supabase || !session) return;
     setLoading(true);
     setError('');
     try {
-      const [productRows, salesRows, itemRows, returnRows, loanRows, movementRows, settingsResult] =
-        await Promise.all([
-          fetchAllRows((from, to) =>
-            supabase.from('products').select('*').order('name').range(from, to)
-          ),
-          fetchAllRows((from, to) =>
-            supabase
-              .from('sales')
-              .select('*')
-              .order('created_at', { ascending: false })
-              .range(from, to)
-          ),
-          fetchAllRows((from, to) => supabase.from('sale_items').select('*').order('id').range(from, to)),
-          fetchAllRows((from, to) =>
-            supabase
-              .from('returns')
-              .select('*')
-              .order('created_at', { ascending: false })
-              .range(from, to)
-          ),
-          fetchAllRows((from, to) =>
-            supabase
-              .from('loans')
-              .select('*')
-              .order('created_at', { ascending: false })
-              .range(from, to)
-          ),
-          fetchAllRows((from, to) =>
-            supabase.from('stock_movements').select('product_id,quantity').order('id').range(from, to)
-          ),
-          supabase.from('business_settings').select('*').maybeSingle()
-        ]);
-      if (settingsResult.error) throw new Error(settingsResult.error.message);
-      const movements = movementRows;
-      const stockByProduct = new Map<string, number>();
-      movements.forEach((movement) =>
-        stockByProduct.set(
-          movement.product_id,
-          (stockByProduct.get(movement.product_id) || 0) + Number(movement.quantity)
-        )
-      );
-      const nextProducts = productRows.map((product) => ({
-        ...product,
-        purchase_cost: Number(product.average_cost ?? product.purchase_cost ?? 0),
-        sale_price: Number(product.default_sale_price ?? product.sale_price ?? 0),
-        minimum_stock: Number(product.low_stock_threshold ?? product.minimum_stock ?? 10),
-        stock: Number((product.current_stock ?? stockByProduct.get(product.id) ?? 0))
-      }));
-      const items = itemRows;
-      setProducts(nextProducts);
-      setSales(
-        salesRows.map((sale) => ({
-          ...sale,
-          net_total: Number(sale.net_total),
-          items: items
-            .filter((item) => item.sale_id === sale.id)
-            .map((item) => ({
-              ...item,
-              quantity: Number(item.quantity),
-              unit_price: Number(item.unit_price),
-              line_total: Number(item.line_total),
-              purchase_cost_snapshot: Number(item.purchase_cost_snapshot),
-              cost_total_snapshot: Number(item.cost_total_snapshot)
-            }))
-        }))
-      );
-      setReturns(
-        returnRows.map((row) => ({
-          ...row,
-          quantity: Number(row.quantity),
-          refund_amount: Number(row.refund_amount),
-          cost_amount_snapshot: Number(row.cost_amount_snapshot)
-        }))
-      );
-      setLoans(
-        loanRows.map((loan) => ({
-          ...loan,
-          amount: Number(loan.amount),
-          paid_amount: Number(loan.paid_amount),
-          remaining_amount: Number(loan.remaining_amount)
-        }))
-      );
-      if (settingsResult.data) {
-        const nextSettings = {
-          business_name: settingsResult.data.business_name,
-          address: settingsResult.data.address,
-          phone1: settingsResult.data.phone1,
-          phone2: settingsResult.data.phone2,
-          receipt_footer: settingsResult.data.receipt_footer
-        };
-        setSettings(nextSettings);
-        setBusinessForm(nextSettings);
-      } else {
-        setSettings(defaultSettings);
-        setBusinessForm(defaultSettings);
+      // 1. Immediately read from local IndexedDB
+      await refreshFromOfflineDb();
+
+      // 2. If online and Supabase is reachable, perform two-way sync
+      if (syncState.isOnline || (typeof navigator !== 'undefined' && navigator.onLine)) {
+        await syncEngine.sync();
+        await refreshFromOfflineDb();
       }
     } catch (cause) {
-      setError(errorText(cause));
+      console.warn('Sync failed, working locally:', cause);
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   }
 
   const loadDataEffect = useEffectEvent(loadData);
@@ -403,17 +485,44 @@ export default function Home() {
     setAuthBusy(true);
     setError('');
     setMessage('');
-    const result = await supabase.auth.signInWithPassword({ email, password });
-    if (result.error) {
-      setError(result.error.message);
-    } else {
-      const { error: claimError } = await supabase.rpc('claim_shop_admin');
-      if (claimError) {
-        await supabase.auth.signOut();
-        setError(claimError.message);
+    try {
+      const result = await supabase.auth.signInWithPassword({ email, password });
+      if (result.error) {
+        setError(result.error.message);
+      } else if (result.data?.user) {
+        localStorage.setItem(
+          'aziz_pos_trusted_device',
+          JSON.stringify({
+            id: result.data.user.id,
+            email: result.data.user.email,
+            trustedAt: new Date().toISOString()
+          })
+        );
+        const { error: claimError } = await supabase.rpc('claim_shop_admin');
+        if (claimError) {
+          localStorage.removeItem('aziz_pos_trusted_device');
+          await supabase.auth.signOut();
+          setError(claimError.message);
+        }
       }
+    } catch (cause) {
+      setError(
+        navigator.onLine
+          ? errorText(cause)
+          : 'First-time setup requires internet to link this POS terminal. Please reconnect and sign in once.'
+      );
+    } finally {
+      setAuthBusy(false);
     }
-    setAuthBusy(false);
+  }
+
+  async function handleSignOut() {
+    localStorage.removeItem('aziz_pos_trusted_device');
+    setSession(null);
+    setAccountEmail('');
+    if (supabase) {
+      await supabase.auth.signOut().catch(() => {});
+    }
   }
 
   async function updateCredentials(event: React.FormEvent<HTMLFormElement>) {
@@ -463,28 +572,37 @@ export default function Home() {
   const selectedReturnItem = selectedReturnSale?.items.find(
     (item) => item.product_id === returnForm.productId
   );
-  const todaySales = sales.filter(
-    (sale) => sale.sale_date === today() && sale.status !== 'VOIDED'
-  );
-  const todayRefunds = returns.filter((row) => (row.movement_date || (row as unknown as { return_date?: string }).return_date) === today());
+  const getSaleProfit = (s: Sale): number => {
+    if (s.items && s.items.length > 0) {
+      return s.items.reduce(
+        (sum, item) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
+        0
+      );
+    }
+    return Number((s as any).original_profit || 0);
+  };
+
+  const getReturnProfitReduction = (row: ReturnRow): number => {
+    const refund = Number(row.refund_amount ?? (row as any).refund_total ?? 0);
+    const cost = row.restock ? Number(row.cost_amount_snapshot || 0) : 0;
+    return refund - cost;
+  };
+
+  const todaySales = sales.filter((sale) => {
+    const d = sale.sale_date || sale.created_at?.slice(0, 10);
+    return d === today() && sale.status !== 'VOIDED';
+  });
+  const todayRefunds = returns.filter((row) => {
+    const d = row.movement_date || (row as unknown as { return_date?: string }).return_date || (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
+    return d === today();
+  });
   const todayNetSales = roundMoney(
-    todaySales.reduce((sum, sale) => sum + sale.net_total, 0) -
-      todayRefunds.reduce((sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0), 0)
+    todaySales.reduce((sum, sale) => sum + Number(sale.net_total), 0) -
+      todayRefunds.reduce((sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0), 0)
   );
   const todayProfit = roundMoney(
-    todaySales.reduce(
-      (sum, sale) =>
-        sum +
-        sale.items.reduce(
-          (itemSum, item) => itemSum + item.line_total - item.cost_total_snapshot,
-          0
-        ),
-      0
-    ) -
-      todayRefunds.reduce(
-        (sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0) - (row.restock ? (row.cost_amount_snapshot ?? 0) : 0),
-        0
-      )
+    todaySales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
+      todayRefunds.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
   );
   const stockValue = roundMoney(
     products.reduce((sum, product) => sum + Math.max(0, product.stock) * product.purchase_cost, 0)
@@ -492,31 +610,21 @@ export default function Home() {
   const lowStock = products.filter(
     (product) => product.active && product.stock <= product.minimum_stock
   );
-  const reportSales = sales.filter(
-    (sale) => sale.sale_date >= reportStart && sale.sale_date <= reportEnd && sale.status !== 'VOIDED'
-  );
-  const reportReturns = returns.filter(
-    (row) => {
-      const d = row.movement_date || (row as unknown as { return_date?: string }).return_date;
-      return d && d >= reportStart && d <= reportEnd;
-    }
-  );
+  const reportSales = sales.filter((sale) => {
+    const d = sale.sale_date || sale.created_at?.slice(0, 10);
+    return d && d >= reportStart && d <= reportEnd && sale.status !== 'VOIDED';
+  });
+  const reportReturns = returns.filter((row) => {
+    const d = row.movement_date || (row as unknown as { return_date?: string }).return_date || (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
+    return d && d >= reportStart && d <= reportEnd;
+  });
   const reportNet = roundMoney(
-    reportSales
-      .reduce((sum, sale) => sum + sale.net_total, 0) -
-      reportReturns.reduce((sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0), 0)
+    reportSales.reduce((sum, sale) => sum + Number(sale.net_total), 0) -
+      reportReturns.reduce((sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0), 0)
   );
   const reportProfit = roundMoney(
-    reportSales
-      .reduce(
-        (sum, sale) =>
-          sum + sale.items.reduce((n, item) => n + item.line_total - item.cost_total_snapshot, 0),
-        0
-      ) -
-      reportReturns.reduce(
-        (sum, row) => sum + (row.refund_amount ?? (row as unknown as { refund_total?: number }).refund_total ?? 0) - (row.restock ? (row.cost_amount_snapshot ?? 0) : 0),
-        0
-      )
+    reportSales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
+      reportReturns.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
   );
   const outstandingIn = roundMoney(
     loans
@@ -531,7 +639,6 @@ export default function Home() {
 
   async function createProduct(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase || !session) return;
     try {
       const purchaseCost =
         editingProduct && editingProduct.stock > 0
@@ -542,29 +649,20 @@ export default function Home() {
       if (!newProduct.name.trim() || !newProduct.unit.trim())
         throw new Error('Product name and selling unit are required.');
       const openingStock = quantity(newProduct.opening_stock || '0', true);
-      const saved = await runAction(async () => {
-        const response = editingProduct
-          ? await supabase.rpc('update_product', {
-              p_product_id: editingProduct.id,
-              p_name: newProduct.name.trim(),
-              p_unit: newProduct.unit.trim(),
-              p_purchase_cost: purchaseCost,
-              p_sale_price: salePrice,
-              p_minimum_stock: minimum,
-              p_active: editingProduct.active
-            })
-          : await supabase.rpc('create_product', {
-              p_name: newProduct.name.trim(),
-              p_unit: newProduct.unit.trim(),
-              p_purchase_cost: purchaseCost,
-              p_sale_price: salePrice,
-              p_minimum_stock: minimum,
-              p_opening_stock: openingStock
-            });
-        if (response.error) throw response.error;
-        return true;
-      }, editingProduct ? 'Product updated.' : 'Product saved with opening stock.');
-      if (!saved) return;
+
+      setBusy(true);
+      await saveOfflineProduct({
+        id: editingProduct?.id,
+        name: newProduct.name,
+        unit: newProduct.unit,
+        purchaseCost,
+        salePrice,
+        minimumStock: minimum,
+        openingStock,
+        active: editingProduct?.active
+      });
+
+      setMessage(editingProduct ? 'Product updated locally.' : 'Product saved with starting stock.');
       setEditingProduct(null);
       setNewProduct({
         name: '',
@@ -574,7 +672,12 @@ export default function Home() {
         minimum_stock: '10',
         opening_stock: ''
       });
+      await refreshFromOfflineDb();
+      setBusy(false);
+
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
     } catch (cause) {
+      setBusy(false);
       setError(errorText(cause));
     }
   }
@@ -606,24 +709,29 @@ export default function Home() {
   }, []);
 
   async function toggleProductActive(product: Product) {
-    if (!supabase) return;
-    await runAction(async () => {
-      const { error: rpcError } = await supabase.rpc('update_product', {
-        p_product_id: product.id,
-        p_name: product.name,
-        p_unit: product.unit,
-        p_purchase_cost: product.purchase_cost,
-        p_sale_price: product.sale_price,
-        p_minimum_stock: product.minimum_stock,
-        p_active: !product.active
+    try {
+      setBusy(true);
+      await saveOfflineProduct({
+        id: product.id,
+        name: product.name,
+        unit: product.unit,
+        purchaseCost: product.purchase_cost,
+        salePrice: product.sale_price,
+        minimumStock: product.minimum_stock,
+        active: !product.active
       });
-      if (rpcError) throw rpcError;
-    }, product.active ? 'Product deactivated.' : 'Product activated.');
+      setMessage(product.active ? 'Product deactivated.' : 'Product activated.');
+      await refreshFromOfflineDb();
+      setBusy(false);
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
+    } catch (cause) {
+      setBusy(false);
+      setError(errorText(cause));
+    }
   }
 
   async function createSale(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) return;
     try {
       const items = cart
         .filter((line) => line.productId)
@@ -635,22 +743,29 @@ export default function Home() {
       if (!items.length) throw new Error('Add at least one product to the bill.');
       if (new Set(items.map((item) => item.productId)).size !== items.length)
         throw new Error('Each product can appear once. Edit its existing line quantity.');
-      const saved = await runAction(async () => {
-        const { data, error: rpcError } = await supabase.rpc('create_sale', {
-          p_date: today(),
-          p_items: items,
-          p_notes: null
-        });
-        if (rpcError) throw rpcError;
-        return data as { invoiceNumber: string; netTotal: number };
-      }, 'Sale saved and stock updated atomically.');
-      if (!saved) return;
+
+      // Immediate client-side validation against stock
+      for (const item of items) {
+        const prod = products.find((p) => p.id === item.productId);
+        if (prod && item.quantity > prod.stock) {
+          throw new Error(`Only ${formatQuantity(prod.stock)} ${prod.unit} available of "${prod.name}". You attempted to sell ${item.quantity}.`);
+        }
+      }
+
+      setBusy(true);
+      const offlineResult = await createOfflineSale({
+        items,
+        customerName: saleCustomerName.trim() || null,
+        customerPhone: saleCustomerPhone.trim() || null,
+        notes: null
+      });
+
       setReceipt({
         kind: 'SALE',
-        number: saved.invoiceNumber,
+        number: offlineResult.sale.invoice_number,
         date: today(),
         totalLabel: 'TOTAL',
-        total: Number(saved.netTotal),
+        total: Number(offlineResult.sale.net_total),
         items: items.map((line) => {
           const product = products.find((candidate) => candidate.id === line.productId)!;
           const rate = line.unitPrice ?? product.sale_price;
@@ -663,29 +778,75 @@ export default function Home() {
           };
         })
       });
+
       setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
+      setSaleCustomerName('');
+      setSaleCustomerPhone('');
+      setMessage(`Sale ${offlineResult.sale.invoice_number} saved.`);
+
+      await refreshFromOfflineDb();
+      setBusy(false);
+
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
     } catch (cause) {
+      setBusy(false);
+      setError(errorText(cause));
+    }
+  }
+
+  function openQuickStock(product: Product) {
+    setQuickStockProduct(product);
+    setQuickStockQty('');
+    setQuickStockCost(String(product.purchase_cost || ''));
+    setError('');
+    setMessage('');
+  }
+
+  async function handleQuickStockSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!quickStockProduct) return;
+    try {
+      const qty = quantity(quickStockQty);
+      const cost = amount(quickStockCost, 'Buying rate');
+      setBusy(true);
+      await recordOfflineStock({
+        productId: quickStockProduct.id,
+        quantity: qty,
+        purchaseCost: cost,
+        movementType: 'PURCHASE',
+        date: today(),
+        notes: 'Quick restock'
+      });
+      setMessage(`Added ${qty} ${quickStockProduct.unit} to ${quickStockProduct.name}.`);
+      setQuickStockProduct(null);
+      setQuickStockQty('');
+      setQuickStockCost('');
+
+      await refreshFromOfflineDb();
+      setBusy(false);
+
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
+    } catch (cause) {
+      setBusy(false);
       setError(errorText(cause));
     }
   }
 
   async function addStock(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) return;
     try {
-      quantity(stockForm.quantity);
-      await runAction(async () => {
-        const { error: rpcError } = await supabase.rpc('record_stock', {
-          p_product_id: stockForm.productId,
-          p_quantity: Number(stockForm.quantity),
-          p_purchase_cost: Number(stockForm.purchaseCost),
-          p_date: stockForm.date,
-          p_movement_type: stockForm.movementType,
-          p_reference: null,
-          p_notes: stockForm.notes || null
-        });
-        if (rpcError) throw rpcError;
-      }, 'Stock recorded and average buying cost recalculated.');
+      const qty = quantity(stockForm.quantity);
+      const cost = amount(stockForm.purchaseCost, 'Buying rate');
+      setBusy(true);
+      await recordOfflineStock({
+        productId: stockForm.productId,
+        quantity: qty,
+        purchaseCost: cost,
+        movementType: stockForm.movementType as any,
+        date: stockForm.date,
+        notes: stockForm.notes || null
+      });
+      setMessage('Stock recorded and average buying cost recalculated.');
       setStockForm({
         productId: '',
         quantity: '',
@@ -694,7 +855,13 @@ export default function Home() {
         movementType: 'PURCHASE',
         notes: ''
       });
+
+      await refreshFromOfflineDb();
+      setBusy(false);
+
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
     } catch (cause) {
+      setBusy(false);
       setError(errorText(cause));
     }
   }
@@ -720,6 +887,7 @@ export default function Home() {
         if (rpcError) throw rpcError;
       }, 'Stock count reconciled and movement recorded.');
       setAdjustForm({ productId: '', type: 'PHYSICAL', quantity: '', physicalCount: '', reason: '', date: today() });
+      await refreshFromOfflineDb();
     } catch (cause) {
       setError(errorText(cause));
     }
@@ -727,47 +895,37 @@ export default function Home() {
 
   async function createReturn(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!supabase) return;
     try {
       const qty = quantity(returnForm.quantity);
       if (!returnForm.saleId) throw new Error('Please select the original sales bill to return items from.');
       if (!returnForm.productId) throw new Error('Choose a product to return.');
       const selectedProduct = products.find((product) => product.id === returnForm.productId);
-      const saved = await runAction(async () => {
-        const { data, error: rpcError } = await supabase.rpc('create_return', {
-          p_date: returnForm.date,
-          p_reason: returnForm.reason,
-          p_sale_id: returnForm.saleId,
-          p_items: [
-            {
-              productId: returnForm.productId,
-              quantity: qty
-            }
-          ],
-          p_notes: null
-        });
-        if (rpcError) throw rpcError;
-        return data as { billNumber: string; refundTotal: number };
-      }, 'Return saved with its refund and stock changes.');
-      if (!saved) return;
-      const refundTotal = Number(saved.refundTotal);
+
+      setBusy(true);
+      const offlineResult = await createOfflineReturn({
+        saleId: returnForm.saleId,
+        items: [{ productId: returnForm.productId, quantity: qty }],
+        reason: returnForm.reason
+      });
+
       setReceipt({
         kind: 'RETURN',
-        number: saved.billNumber,
+        number: offlineResult.returnRow.return_number,
         date: returnForm.date,
         reference: selectedReturnSale?.invoice_number,
-        totalLabel: 'REFUND',
-        total: refundTotal,
+        totalLabel: 'REFUND TOTAL',
+        total: offlineResult.returnRow.refund_total,
         notes: `${returnForm.reason}${returnForm.restock ? '' : ' · Damaged / not added to stock'}`,
         items: [{
           name: selectedReturnItem?.product_name_snapshot || selectedProduct?.name || 'Returned item',
           unit: selectedReturnItem?.unit_snapshot || selectedProduct?.unit || '',
           quantity: qty,
-          rate: qty ? refundTotal / qty : 0,
-          amount: refundTotal,
+          rate: qty ? offlineResult.returnRow.refund_total / qty : 0,
+          amount: offlineResult.returnRow.refund_total,
           note: returnForm.restock ? undefined : 'Damaged / not added to stock'
         }]
       });
+
       setReturnForm({
         saleId: '',
         productId: '',
@@ -777,7 +935,14 @@ export default function Home() {
         date: today(),
         refund: ''
       });
+      setMessage(`Return ${offlineResult.returnRow.return_number} saved.`);
+
+      await refreshFromOfflineDb();
+      setBusy(false);
+
+      void syncEngine.sync().then(() => refreshFromOfflineDb());
     } catch (cause) {
+      setBusy(false);
       setError(errorText(cause));
     }
   }
@@ -1060,9 +1225,10 @@ export default function Home() {
         </nav>
         <div className="sidebar-bottom">
           <div className="connection">
-            <span className="online-dot" /> SUPABASE CONNECTED
+            <span className={`online-dot ${syncState.isOnline ? '' : 'offline'}`} />
+            {syncState.isOnline ? 'CLOUD CONNECTED' : 'OFFLINE MODE'}
           </div>
-          <button className="account" onClick={() => void supabase.auth.signOut()}>
+          <button className="account" onClick={() => void handleSignOut()}>
             <span className="avatar">{session.email?.slice(0, 1).toUpperCase()}</span>
             <span>
               <b>{session.email}</b>
@@ -1081,6 +1247,36 @@ export default function Home() {
             <h1>{tab === 'overview' ? settings.business_name : title}</h1>
           </div>
           <div className="top-actions">
+            {/* Real-time Sync Status Indicator */}
+            {syncState.isSyncing ? (
+              <span className="sync-badge syncing" title="Syncing transactions with cloud database">
+                <RefreshCw className="spin" size={13} /> Syncing ({syncState.pendingCount} pending)
+              </span>
+            ) : !syncState.isOnline ? (
+              <span className="sync-badge offline" title="Working offline. All transactions are saved locally on this PC.">
+                <WifiOff size={13} /> Offline · {syncState.pendingCount > 0 ? `${syncState.pendingCount} pending sync` : 'Working locally'}
+              </span>
+            ) : syncState.pendingCount > 0 ? (
+              <span className="sync-badge pending" title="Online. Transactions queued for cloud sync.">
+                <Clock size={13} /> Online · {syncState.pendingCount} pending sync
+              </span>
+            ) : (
+              <span className="sync-badge online" title="All transactions synchronized with cloud">
+                <CheckCircle2 size={13} /> Online · All data synced
+              </span>
+            )}
+
+            {/* Manual Sync Button */}
+            <button
+              type="button"
+              className="sync-btn"
+              onClick={() => void syncEngine.sync().then(() => refreshFromOfflineDb())}
+              disabled={syncState.isSyncing}
+              title="Synchronize local transactions with cloud now"
+            >
+              <RefreshCw size={12} className={syncState.isSyncing ? 'spin' : ''} /> Sync Now
+            </button>
+
             <span className="date-chip">
               {new Intl.DateTimeFormat('en', {
                 weekday: 'short',
@@ -1270,134 +1466,263 @@ export default function Home() {
               <section className="surface form-surface">
                 <SectionHead title="Write a sales bill" eyebrow="NEW TRANSACTION" />
                 <p className="section-copy">
-                  Prices and cost are recorded in the bill when it is saved. Stock is checked again
-                  inside the database transaction.
+                  Prices and cost are recorded in the bill when it is saved. Stock is verified in real-time.
                 </p>
-                <form onSubmit={createSale} className="form-stack">
-                  <div className="bill-lines">
-                    {cart.map((line, index) => {
-                      const product = products.find((item) => item.id === line.productId);
-                      const lineTotal = product
-                        ? lineAmount(
-                            Number(line.quantity) || 0,
-                            Number(line.unitPrice || product.sale_price)
-                          )
-                        : 0;
-                      return (
-                        <div className="bill-line" key={index}>
-                          <label className="field product-pick">
-                            <span>Product</span>
-                            <select
-                              value={line.productId}
-                              onChange={(event) =>
-                                setCart(
-                                  cart.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? {
-                                          ...item,
-                                          productId: event.target.value,
-                                          unitPrice:
-                                            products
-                                              .find((entry) => entry.id === event.target.value)
-                                              ?.sale_price.toFixed(2) || ''
-                                        }
-                                      : item
-                                  )
-                                )
-                              }
-                            >
-                              <option value="">Choose product</option>
-                              {activeProducts.map((item) => (
-                                <option key={item.id} value={item.id} disabled={item.stock <= 0}>
-                                  {item.name} · {formatQuantity(item.stock)} {item.unit}
-                                </option>
-                              ))}
-                            </select>
-                          </label>
-                          <Field label="Quantity">
-                            <input
-                              type="number"
-                              min="0.001"
-                              step="0.001"
-                              value={line.quantity}
-                              onChange={(event) =>
-                                setCart(
-                                  cart.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? { ...item, quantity: event.target.value }
-                                      : item
-                                  )
-                                )
-                              }
-                            />
-                          </Field>
-                          <Field label="Rate (Rs.)">
-                            <input
-                              type="number"
-                              min="0"
-                              step="0.01"
-                              value={line.unitPrice}
-                              onChange={(event) =>
-                                setCart(
-                                  cart.map((item, itemIndex) =>
-                                    itemIndex === index
-                                      ? { ...item, unitPrice: event.target.value }
-                                      : item
-                                  )
-                                )
-                              }
-                            />
-                          </Field>
-                          <div className="line-total">
-                            <small>LINE TOTAL</small>
-                            <b>{formatMoney(lineTotal)}</b>
-                          </div>
-                          <button
-                            type="button"
-                            className="icon-button remove-line"
-                            title="Remove line"
-                            onClick={() =>
-                              setCart(cart.filter((_item, itemIndex) => itemIndex !== index))
-                            }
-                          >
-                            <X size={15} />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <button
-                    type="button"
-                    className="text-button add-line"
-                    onClick={() =>
-                      setCart([...cart, { productId: '', quantity: '1', unitPrice: '' }])
-                    }
-                  >
-                    <Plus size={15} /> Add another item
-                  </button>
-                  <div className="bill-total">
-                    <span>Bill total</span>
-                    <strong>
-                      {formatMoney(
-                        cart.reduce((sum, line) => {
+                {(() => {
+                  const hasOversell = cart.some((line) => {
+                    if (!line.productId) return false;
+                    const p = products.find((candidate) => candidate.id === line.productId);
+                    return p && (Number(line.quantity) > p.stock || p.stock <= 0);
+                  });
+                  return (
+                    <form onSubmit={createSale} className="form-stack">
+                      <div className="form-row">
+                        <Field label="Customer name (optional)">
+                          <input
+                            placeholder="e.g. Walk-in customer or shop name"
+                            value={saleCustomerName}
+                            onChange={(event) => setSaleCustomerName(event.target.value)}
+                          />
+                        </Field>
+                        <Field label="Customer phone (optional)">
+                          <input
+                            placeholder="e.g. 0300-1234567"
+                            value={saleCustomerPhone}
+                            onChange={(event) => setSaleCustomerPhone(event.target.value)}
+                          />
+                        </Field>
+                      </div>
+
+                      <div className="bill-lines">
+                        {cart.map((line, index) => {
                           const product = products.find((item) => item.id === line.productId);
+                          const qtyNum = Number(line.quantity) || 0;
+                          const isOverselling = Boolean(product && qtyNum > product.stock);
+                          const isOutOfStock = Boolean(product && product.stock <= 0);
+                          const isLowStock = Boolean(product && product.stock > 0 && product.stock <= product.minimum_stock);
+                          const lineTotal = product
+                            ? lineAmount(
+                                qtyNum,
+                                Number(line.unitPrice || product.sale_price)
+                              )
+                            : 0;
+
                           return (
-                            sum +
-                            (product
-                              ? lineAmount(
-                                  Number(line.quantity) || 0,
-                                  Number(line.unitPrice || product.sale_price)
-                                )
-                              : 0)
+                            <div className={`bill-line ${isOverselling || isOutOfStock ? 'oversell' : ''}`} key={index}>
+                              <div className="field product-pick">
+                                <span>Product</span>
+                                <select
+                                  value={line.productId}
+                                  onChange={(event) =>
+                                    setCart(
+                                      cart.map((item, itemIndex) =>
+                                        itemIndex === index
+                                          ? {
+                                              ...item,
+                                              productId: event.target.value,
+                                              unitPrice:
+                                                products
+                                                  .find((entry) => entry.id === event.target.value)
+                                                  ?.sale_price.toFixed(2) || ''
+                                            }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                >
+                                  <option value="">Choose product...</option>
+                                  {activeProducts.map((item) => (
+                                    <option key={item.id} value={item.id}>
+                                      {item.name} · {formatQuantity(item.stock)} {item.unit} {item.stock <= 0 ? '(OUT OF STOCK)' : ''}
+                                    </option>
+                                  ))}
+                                </select>
+
+                                {product && (
+                                  <div>
+                                    {product.stock <= 0 ? (
+                                      <span className="stock-pill error">
+                                        🚫 OUT OF STOCK (0 {product.unit} on shelf)
+                                      </span>
+                                    ) : isOverselling ? (
+                                      <span className="stock-pill error">
+                                        ⛔ EXCEEDS STOCK! Only {formatQuantity(product.stock)} {product.unit} available
+                                      </span>
+                                    ) : isLowStock ? (
+                                      <span className="stock-pill low">
+                                        ⚠️ Low stock: {formatQuantity(product.stock)} {product.unit} available
+                                      </span>
+                                    ) : (
+                                      <span className="stock-pill ok">
+                                        ✓ In stock: {formatQuantity(product.stock)} {product.unit} available
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
+                              <Field label={`Quantity ${product ? `(${product.unit})` : ''}`}>
+                                <div className="qty-stepper-wrap">
+                                  <button
+                                    type="button"
+                                    className="qty-step-btn minus"
+                                    title="Decrease quantity"
+                                    disabled={qtyNum <= 1}
+                                    onClick={() => {
+                                      const next = Math.max(1, qtyNum - 1);
+                                      setCart(
+                                        cart.map((item, i) =>
+                                          i === index ? { ...item, quantity: String(next) } : item
+                                        )
+                                      );
+                                    }}
+                                  >
+                                    −
+                                  </button>
+                                  <input
+                                    type="number"
+                                    min="0.001"
+                                    step="any"
+                                    value={line.quantity}
+                                    onChange={(event) =>
+                                      setCart(
+                                        cart.map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? { ...item, quantity: event.target.value }
+                                            : item
+                                        )
+                                      )
+                                    }
+                                  />
+                                  <button
+                                    type="button"
+                                    className="qty-step-btn plus"
+                                    title="Increase quantity"
+                                    disabled={product ? qtyNum >= product.stock : false}
+                                    onClick={() => {
+                                      const next = qtyNum + 1;
+                                      setCart(
+                                        cart.map((item, i) =>
+                                          i === index ? { ...item, quantity: String(next) } : item
+                                        )
+                                      );
+                                    }}
+                                  >
+                                    +
+                                  </button>
+                                </div>
+                                {isOverselling && product && product.stock > 0 && (
+                                  <button
+                                    type="button"
+                                    className="quick-set-btn"
+                                    title="Set quantity to maximum available stock"
+                                    onClick={() =>
+                                      setCart(
+                                        cart.map((item, i) =>
+                                          i === index ? { ...item, quantity: String(product.stock) } : item
+                                        )
+                                      )
+                                    }
+                                  >
+                                    ⚡ Set to max ({formatQuantity(product.stock)} {product.unit})
+                                  </button>
+                                )}
+                              </Field>
+
+                              <Field label="Rate (Rs.)">
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  value={line.unitPrice}
+                                  onChange={(event) =>
+                                    setCart(
+                                      cart.map((item, itemIndex) =>
+                                        itemIndex === index
+                                          ? { ...item, unitPrice: event.target.value }
+                                          : item
+                                      )
+                                    )
+                                  }
+                                />
+                              </Field>
+
+                              <div className="line-total">
+                                <small>LINE TOTAL</small>
+                                <b>{formatMoney(lineTotal)}</b>
+                              </div>
+
+                              <button
+                                type="button"
+                                className="icon-button remove-line"
+                                title="Remove line"
+                                onClick={() =>
+                                  setCart(cart.filter((_item, itemIndex) => itemIndex !== index))
+                                }
+                              >
+                                <X size={15} />
+                              </button>
+                            </div>
                           );
-                        }, 0)
+                        })}
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className="text-button add-line"
+                          onClick={() =>
+                            setCart([...cart, { productId: '', quantity: '1', unitPrice: '' }])
+                          }
+                        >
+                          <Plus size={15} /> Add another item
+                        </button>
+                      </div>
+
+                      <div className="bill-total">
+                        <span>Bill total</span>
+                        <strong>
+                          {formatMoney(
+                            cart.reduce((sum, line) => {
+                              const product = products.find((item) => item.id === line.productId);
+                              return (
+                                sum +
+                                (product
+                                  ? lineAmount(
+                                      Number(line.quantity) || 0,
+                                      Number(line.unitPrice || product.sale_price)
+                                    )
+                                  : 0)
+                              );
+                            }, 0)
+                          )}
+                        </strong>
+                      </div>
+
+                      {hasOversell && (
+                        <div className="oversell-banner">
+                          <AlertTriangle size={20} />
+                          <div>
+                            <strong>STOP: Quantity exceeds available stock!</strong>
+                            <p>
+                              One or more items in this bill have a quantity greater than shelf stock.
+                              Reduce the quantity or click &ldquo;Set to max&rdquo; to complete the sale.
+                            </p>
+                          </div>
+                        </div>
                       )}
-                    </strong>
-                  </div>
-                  <button className="button primary" disabled={busy || !activeProducts.length}>
-                    <ShoppingCart size={16} /> Save bill
-                  </button>
-                </form>
+
+                      <button
+                        className="button primary"
+                        disabled={busy || !activeProducts.length || hasOversell || cart.every((l) => !l.productId)}
+                        title={hasOversell ? 'Cannot save: Stock exceeded' : 'Save and print bill'}
+                      >
+                        <ShoppingCart size={16} />
+                        {hasOversell ? '⛔ Cannot Save (Stock Exceeded)' : 'Save & Print bill'}
+                      </button>
+                    </form>
+                  );
+                })()}
               </section>
               <aside className="surface help-surface">
                 <p className="eyebrow">BILLING NOTES</p>
@@ -1447,7 +1772,21 @@ export default function Home() {
                         required
                         maxLength={40}
                         disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                        placeholder="e.g. Box"
                       />
+                      <div className="unit-chips">
+                        {['Box', 'Piece', 'Kg', 'Carton', 'Packet', 'Bag', 'Dozen', 'Roll'].map((u) => (
+                          <button
+                            key={u}
+                            type="button"
+                            className={`unit-chip ${newProduct.unit.toLowerCase() === u.toLowerCase() ? 'active' : ''}`}
+                            onClick={() => setNewProduct({ ...newProduct, unit: u })}
+                            disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                          >
+                            {u}
+                          </button>
+                        ))}
+                      </div>
                     </Field>
                     <Field label="Minimum stock">
                       <input
@@ -1489,11 +1828,12 @@ export default function Home() {
                     </Field>
                   </div>
                   {!editingProduct && (
-                    <Field label="Opening stock (optional)">
+                    <Field label="Starting shelf stock (optional - saves in 1 step)">
                       <input
                         type="number"
                         min="0"
                         step="0.001"
+                        placeholder="e.g. 50 (Instant stock on hand so you can sell right away)"
                         value={newProduct.opening_stock}
                         onChange={(event) => setNewProduct({ ...newProduct, opening_stock: event.target.value })}
                       />
@@ -1569,7 +1909,7 @@ export default function Home() {
                     <option value="LOW_STOCK">Low stock</option>
                   </select>
                 </div>
-                <ProductsTable products={visibleProducts} onEdit={beginEditProduct} onToggleActive={toggleProductActive} />
+                <ProductsTable products={visibleProducts} onEdit={beginEditProduct} onToggleActive={toggleProductActive} onQuickStock={openQuickStock} />
               </section>
             </div>
           )}
@@ -1676,7 +2016,7 @@ export default function Home() {
                   title="Current inventory"
                   eyebrow={`${products.filter((item) => item.active).length} ACTIVE ITEMS`}
                 />
-                <ProductsTable products={products} onEdit={beginEditProduct} onToggleActive={toggleProductActive} />
+                <ProductsTable products={products} onEdit={beginEditProduct} onToggleActive={toggleProductActive} onQuickStock={openQuickStock} />
               </section>
             </div>
           )}
@@ -2279,6 +2619,46 @@ export default function Home() {
                 >
                   <ArrowDownToLine size={15} /> Export records
                 </button>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={async () => {
+                    const [p, s, si, r, ri, im, sq] = await Promise.all([
+                      offlineDb.products.toArray(),
+                      offlineDb.sales.toArray(),
+                      offlineDb.sale_items.toArray(),
+                      offlineDb.returns.toArray(),
+                      offlineDb.return_items.toArray(),
+                      offlineDb.inventory_movements.toArray(),
+                      offlineDb.sync_queue.toArray()
+                    ]);
+                    const content = JSON.stringify(
+                      {
+                        exportedAt: new Date().toISOString(),
+                        shop: 'Aziz & Son Wholesale',
+                        version: '1.0-offline-pwa',
+                        products: p,
+                        sales: s,
+                        sale_items: si,
+                        returns: r,
+                        return_items: ri,
+                        inventory_movements: im,
+                        sync_queue: sq
+                      },
+                      null,
+                      2
+                    );
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(
+                      new Blob([content], { type: 'application/json' })
+                    );
+                    link.download = `aziz-pos-offline-backup-${today()}.json`;
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                  }}
+                >
+                  <ArrowDownToLine size={15} /> Export Local POS Database Backup (Offline)
+                </button>
                 <div className="reset-zone">
                   <p className="eyebrow">DESTRUCTIVE ACTION</p>
                   <h3>Reset all shop data</h3>
@@ -2302,6 +2682,64 @@ export default function Home() {
             settings={settings}
             onClose={() => setReceipt(null)}
           />
+        )}
+        {quickStockProduct && (
+          <div className="modal-overlay" role="dialog" aria-modal="true">
+            <div className="modal-dialog">
+              <div className="modal-header">
+                <h3>+ Quick Restock: {quickStockProduct.name}</h3>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => setQuickStockProduct(null)}
+                  title="Close"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <form onSubmit={handleQuickStockSubmit}>
+                <div className="modal-body form-stack">
+                  <p style={{ margin: 0, fontSize: '13px', color: '#4a5568' }}>
+                    Current shelf stock: <strong>{formatQuantity(quickStockProduct.stock)} {quickStockProduct.unit}</strong>
+                  </p>
+                  <Field label={`New quantity received (${quickStockProduct.unit})`}>
+                    <input
+                      type="number"
+                      min="0.001"
+                      step="any"
+                      autoFocus
+                      required
+                      placeholder="e.g. 50"
+                      value={quickStockQty}
+                      onChange={(event) => setQuickStockQty(event.target.value)}
+                    />
+                  </Field>
+                  <Field label="Buying rate per unit (Rs.)">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      required
+                      value={quickStockCost}
+                      onChange={(event) => setQuickStockCost(event.target.value)}
+                    />
+                  </Field>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="button secondary"
+                    onClick={() => setQuickStockProduct(null)}
+                  >
+                    Cancel
+                  </button>
+                  <button type="submit" className="button primary" disabled={busy || !quickStockQty}>
+                    <PackagePlus size={15} /> Save Stock Now
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
         <footer className="workspace-footer">
           <span>AZIZ & SON · SHOP LEDGER</span>
@@ -2459,6 +2897,13 @@ function SalesTable({
                     ? 'pill-gold'
                     : 'pill-green';
 
+            const saleProfit = roundMoney(
+              (sale.items && sale.items.length > 0
+                ? sale.items.reduce((sum, item) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)), 0)
+                : Number(sale.original_profit || 0)) -
+              saleReturns.reduce((sum, r) => sum + (r.refund_amount - (r.restock ? (r.cost_amount_snapshot || 0) : 0)), 0)
+            );
+
             return (
               <tr key={sale.id}>
                 <td>
@@ -2484,6 +2929,9 @@ function SalesTable({
                       −{formatMoney(refundedAmount)} returned
                     </small>
                   )}
+                  <small style={{ color: saleProfit >= 0 ? '#10b981' : '#ef4444', display: 'block', fontSize: '10px', marginTop: '2px' }}>
+                    Profit: {formatMoney(saleProfit)}
+                  </small>
                 </td>
                 <td className="print-column">
                   {onPrint && (
@@ -2512,11 +2960,13 @@ function SalesTable({
 function ProductsTable({
   products,
   onEdit,
-  onToggleActive
+  onToggleActive,
+  onQuickStock
 }: {
   products: Product[];
   onEdit?: (product: Product) => void;
   onToggleActive?: (product: Product) => void;
+  onQuickStock?: (product: Product) => void;
 }) {
   return products.length ? (
     <div className="table-wrap">
@@ -2529,7 +2979,7 @@ function ProductsTable({
             <th className="align-right">Buying rate</th>
             <th className="align-right">Selling rate</th>
             <th>Stock status</th>
-            {(onEdit || onToggleActive) && <th>Actions</th>}
+            {(onEdit || onToggleActive || onQuickStock) && <th>Actions</th>}
           </tr>
         </thead>
         <tbody>
@@ -2553,10 +3003,40 @@ function ProductsTable({
                     {state === 'OK' ? 'In range' : state === 'LOW' ? 'Low stock' : 'Out of stock'}
                   </span>
                 </td>
-                {(onEdit || onToggleActive) && (
+                {(onEdit || onToggleActive || onQuickStock) && (
                   <td className="product-actions">
-                    {onEdit && <button className="icon-button" type="button" title={`Edit ${product.name}`} aria-label={`Edit ${product.name}`} onClick={() => onEdit(product)}><Pencil size={15} /></button>}
-                    {onToggleActive && <button className="icon-button" type="button" title={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`} aria-label={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`} onClick={() => onToggleActive(product)}><Power size={15} /></button>}
+                    {onQuickStock && (
+                      <button
+                        className="button secondary compact-btn"
+                        type="button"
+                        title={`Add Stock to ${product.name}`}
+                        onClick={() => onQuickStock(product)}
+                      >
+                        <PackagePlus size={13} /> + Stock
+                      </button>
+                    )}
+                    {onEdit && (
+                      <button
+                        className="icon-button"
+                        type="button"
+                        title={`Edit ${product.name}`}
+                        aria-label={`Edit ${product.name}`}
+                        onClick={() => onEdit(product)}
+                      >
+                        <Pencil size={15} />
+                      </button>
+                    )}
+                    {onToggleActive && (
+                      <button
+                        className="icon-button"
+                        type="button"
+                        title={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
+                        aria-label={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
+                        onClick={() => onToggleActive(product)}
+                      >
+                        <Power size={15} />
+                      </button>
+                    )}
                   </td>
                 )}
               </tr>

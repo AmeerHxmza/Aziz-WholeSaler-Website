@@ -13,9 +13,10 @@ test('End-to-end Supabase flow: Auth, Products, Sales, 80mm Receipt, Returns & P
   });
 
   // 1. Sign In
+  const password = process.env.ADMIN_PASSWORD || 'aziz1234';
   const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
     email: 'aziz@gmail.com',
-    password: '123456'
+    password
   });
   assert.equal(authError, null, `Auth failed: ${authError?.message}`);
   assert.ok(authData.session, 'User session missing');
@@ -126,29 +127,31 @@ test('End-to-end Supabase flow: Auth, Products, Sales, 80mm Receipt, Returns & P
   // 8. Fetch Returns from Supabase & Verify Profit Math
   const { data: returnsData, error: retFetchError } = await supabase
     .from('returns')
-    .select('*')
+    .select('*, return_items(*)')
     .eq('sale_id', saleResult.id);
   assert.equal(retFetchError, null);
   assert.equal(returnsData.length, 1);
   const retRow = returnsData[0];
-  assert.equal(Number(retRow.refund_amount), 100000);
-  assert.equal(Number(retRow.cost_amount_snapshot), 50000);
+  const itemRow = retRow.return_items?.[0];
+  const refundAmount = Number(retRow.refund_total ?? itemRow?.refund_amount ?? 0);
+  const costSnapshot = Number(itemRow ? itemRow.unit_cost_snapshot * itemRow.quantity_returned : 0);
+  assert.equal(refundAmount, 100000);
+  assert.equal(costSnapshot, 50000);
 
   // Profit calculation logic exactly matching frontend:
   const returnProfitImpact = roundMoney(
-    Number(retRow.refund_amount) - (retRow.restock ? Number(retRow.cost_amount_snapshot) : 0)
+    refundAmount - (itemRow?.restock !== false ? costSnapshot : 0)
   );
   assert.equal(returnProfitImpact, 50000, 'Return impact should be 50,000');
   const finalProfit = roundMoney(initialProfit - returnProfitImpact);
   assert.equal(finalProfit, 50000, 'Final adjusted profit must be 50,000 after 1k return!');
 
-  // 9. Verify Stock in stock_movements
-  const { data: movements, error: moveError } = await supabase
-    .from('stock_movements')
-    .select('quantity')
-    .eq('product_id', productId);
-  assert.equal(moveError, null);
-  // Opening: +2500, Sale: -2000, Return: +1000 -> Expected Remaining Stock: 1500
-  const totalStock = movements.reduce((sum, m) => sum + Number(m.quantity), 0);
-  assert.equal(totalStock, 1500, 'Stock after return should be 1,500');
+  // 9. Verify Stock on Product Row
+  const { data: prodFinal, error: prodFinalError } = await supabase
+    .from('products')
+    .select('current_stock')
+    .eq('id', productId)
+    .single();
+  assert.equal(prodFinalError, null);
+  assert.equal(Number(prodFinal.current_stock), 1500, 'Stock after return should be 1,500');
 });

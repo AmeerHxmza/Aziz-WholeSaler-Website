@@ -2,6 +2,7 @@
 
 import { use, useEffect, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
+import { offlineDb } from '@/lib/db/offline-db';
 import { formatMoney, formatQuantity } from '@/lib/calculations';
 import { Printer, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
@@ -23,8 +24,19 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
 
   useEffect(() => {
     async function fetchReceipt() {
-      if (!supabase) return;
       try {
+        // 1. Try local IndexedDB first
+        const localRet = await offlineDb.returns.get(id);
+        if (localRet) {
+          const localItems = await offlineDb.return_items.where('return_id').equals(id).toArray();
+          setRet(localRet);
+          setItems(localItems);
+          setLoading(false);
+          return;
+        }
+
+        // 2. Cloud fallback
+        if (!supabase) return;
         const [retRes, itemsRes, settingsRes] = await Promise.all([
           supabase.from('returns').select('*').eq('id', id).maybeSingle(),
           supabase.from('return_items').select('*, products(name, unit)').eq('return_id', id).order('id'),
