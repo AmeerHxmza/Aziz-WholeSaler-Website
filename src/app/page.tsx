@@ -1041,6 +1041,42 @@ export default function Home() {
       window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
       const { error: resetError } = await supabase.rpc('reset_shop_data', { p_confirmation: resetPhrase });
       if (resetError) throw resetError;
+
+      // Wipe local IndexedDB offline tables so client mirror is completely cleared
+      try {
+        await offlineDb.transaction('rw', [
+          offlineDb.products,
+          offlineDb.sales,
+          offlineDb.sale_items,
+          offlineDb.returns,
+          offlineDb.return_items,
+          offlineDb.stock_entries,
+          offlineDb.stock_entry_items,
+          offlineDb.inventory_movements,
+          offlineDb.sync_queue,
+          offlineDb.settings
+        ], async () => {
+          await Promise.all([
+            offlineDb.products.clear(),
+            offlineDb.sales.clear(),
+            offlineDb.sale_items.clear(),
+            offlineDb.returns.clear(),
+            offlineDb.return_items.clear(),
+            offlineDb.stock_entries.clear(),
+            offlineDb.stock_entry_items.clear(),
+            offlineDb.inventory_movements.clear(),
+            offlineDb.sync_queue.clear(),
+            offlineDb.settings.clear()
+          ]);
+        });
+      } catch (dbErr) {
+        console.warn('Local offline storage wipe error:', dbErr);
+      }
+
+      setProducts([]);
+      setSales([]);
+      setReturns([]);
+      setLoans([]);
       setResetPhrase('');
       setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
       setEditingProduct(null);
