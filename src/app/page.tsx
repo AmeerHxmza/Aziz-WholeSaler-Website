@@ -1,0 +1,2584 @@
+'use client';
+
+import { useEffect, useEffectEvent, useState } from 'react';
+import { createPortal } from 'react-dom';
+import {
+  Activity,
+  ArrowDownToLine,
+  ArrowLeftRight,
+  Boxes,
+  ChartNoAxesCombined,
+  CircleAlert,
+  ClipboardList,
+  Coins,
+  FileText,
+  LayoutDashboard,
+  LogOut,
+  PackagePlus,
+  Pencil,
+  Plus,
+  Printer,
+  Power,
+  Search,
+  Settings2,
+  ShoppingCart,
+  Undo2,
+  X
+} from 'lucide-react';
+import {
+  amount,
+  formatMoney,
+  formatQuantity,
+  lineAmount,
+  quantity,
+  roundMoney
+} from '@/lib/calculations';
+import { getSupabase } from '@/lib/supabase';
+import { fetchAllRows } from '@/lib/fetch-all';
+import { createReceiptPdf } from '@/lib/receipt-pdf';
+
+type Product = {
+  id: string;
+  name: string;
+  unit: string;
+  purchase_cost: number;
+  sale_price: number;
+  minimum_stock: number;
+  active: boolean;
+  stock: number;
+};
+type SaleItem = {
+  id: number;
+  sale_id: string;
+  product_id: string;
+  product_name_snapshot: string;
+  unit_snapshot: string;
+  purchase_cost_snapshot: number;
+  cost_total_snapshot: number;
+  quantity: number;
+  unit_price: number;
+  line_total: number;
+};
+type Sale = {
+  id: string;
+  invoice_number: string;
+  sale_date: string;
+  net_total: number;
+  status: string;
+  notes: string | null;
+  created_at: string;
+  items: SaleItem[];
+};
+type ReturnRow = {
+  id: number;
+  bill_number: string;
+  sale_id: string | null;
+  invoice_number: string | null;
+  product_id: string;
+  product_name_snapshot: string;
+  unit_snapshot: string;
+  quantity: number;
+  refund_amount: number;
+  cost_amount_snapshot: number;
+  restock: boolean;
+  reason: string;
+  movement_date: string;
+};
+type Loan = {
+  id: string;
+  person_name: string;
+  type: 'GIVEN' | 'TAKEN';
+  amount: number;
+  paid_amount: number;
+  remaining_amount: number;
+  status: string;
+  loan_date: string;
+  notes: string | null;
+};
+type ReceiptRecord = {
+  kind: 'SALE' | 'RETURN';
+  number: string;
+  date: string;
+  reference?: string;
+  totalLabel: string;
+  total: number;
+  notes?: string;
+  items: { name: string; unit: string; quantity: number; rate: number; amount: number; note?: string }[];
+};
+type Tab =
+  | 'overview'
+  | 'sales'
+  | 'products'
+  | 'stock'
+  | 'returns'
+  | 'money'
+  | 'reports'
+  | 'settings';
+type CartLine = { productId: string; quantity: string; unitPrice: string };
+
+const today = () => {
+  const date = new Date();
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+};
+const defaultSettings = {
+  business_name: 'Aziz & Son Wholesaler',
+  address: '',
+  phone1: '',
+  phone2: '',
+  receipt_footer: 'Thank you for your business!'
+};
+const navItems: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'sales', label: 'New sale', icon: ShoppingCart },
+  { id: 'products', label: 'Products', icon: Boxes },
+  { id: 'stock', label: 'Stock', icon: PackagePlus },
+  { id: 'returns', label: 'Returns', icon: Undo2 },
+  { id: 'money', label: 'Money ledger', icon: Coins },
+  { id: 'reports', label: 'Reports', icon: ChartNoAxesCombined },
+  { id: 'settings', label: 'Settings', icon: Settings2 }
+];
+
+function saleReceipt(sale: Sale): ReceiptRecord {
+  return {
+    kind: 'SALE',
+    number: sale.invoice_number,
+    date: sale.sale_date,
+    totalLabel: 'TOTAL',
+    total: sale.net_total,
+    items: sale.items.map((item) => ({
+      name: item.product_name_snapshot,
+      unit: item.unit_snapshot,
+      quantity: item.quantity,
+      rate: item.unit_price,
+      amount: item.line_total
+    }))
+  };
+}
+
+function savedReturnReceipt(selected: ReturnRow, returns: ReturnRow[]): ReceiptRecord {
+  const rows = returns.filter((row) => row.bill_number === selected.bill_number);
+  return {
+    kind: 'RETURN',
+    number: selected.bill_number,
+    date: selected.movement_date,
+    reference: selected.invoice_number || undefined,
+    totalLabel: 'REFUND',
+    total: roundMoney(rows.reduce((sum, row) => sum + row.refund_amount, 0)),
+    notes: selected.reason,
+    items: rows.map((row) => ({
+      name: row.product_name_snapshot,
+      unit: row.unit_snapshot,
+      quantity: row.quantity,
+      rate: row.quantity ? row.refund_amount / row.quantity : 0,
+      amount: row.refund_amount,
+      note: row.restock ? undefined : 'Damaged / not added to stock'
+    }))
+  };
+}
+
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : 'The request could not be completed.';
+}
+
+export default function Home() {
+  const supabase = getSupabase();
+  const [session, setSession] = useState<{ id: string; email?: string } | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [email, setEmail] = useState('aziz@gmail.com');
+  const [accountEmail, setAccountEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [tab, setTab] = useState<Tab>('overview');
+  const [products, setProducts] = useState<Product[]>([]);
+  const [sales, setSales] = useState<Sale[]>([]);
+  const [returns, setReturns] = useState<ReturnRow[]>([]);
+  const [loans, setLoans] = useState<Loan[]>([]);
+  const [settings, setSettings] = useState(defaultSettings);
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+  const [receipt, setReceipt] = useState<ReceiptRecord | null>(null);
+  const [search, setSearch] = useState('');
+  const [productFilter, setProductFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'LOW_STOCK'>('ALL');
+  const [reportStart, setReportStart] = useState(today());
+  const [reportEnd, setReportEnd] = useState(today());
+  const [cart, setCart] = useState<CartLine[]>([{ productId: '', quantity: '1', unitPrice: '' }]);
+  const [newProduct, setNewProduct] = useState({
+    name: '',
+    unit: 'Box',
+    purchase_cost: '',
+    sale_price: '',
+    minimum_stock: '10',
+    opening_stock: ''
+  });
+  const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [stockForm, setStockForm] = useState({
+    productId: '',
+    quantity: '',
+    purchaseCost: '',
+    date: today(),
+    movementType: 'PURCHASE',
+    notes: ''
+  });
+  const [adjustForm, setAdjustForm] = useState({
+    productId: '',
+    type: 'PHYSICAL',
+    quantity: '',
+    physicalCount: '',
+    reason: '',
+    date: today()
+  });
+  const [returnForm, setReturnForm] = useState({
+    saleId: '',
+    productId: '',
+    quantity: '',
+    restock: true,
+    reason: 'Customer return',
+    date: today(),
+    refund: ''
+  });
+  const [loanForm, setLoanForm] = useState({
+    person: '',
+    type: 'GIVEN' as 'GIVEN' | 'TAKEN',
+    amount: '',
+    date: today()
+  });
+  const [settlement, setSettlement] = useState({ loanId: '', amount: '', date: today() });
+  const [businessForm, setBusinessForm] = useState(settings);
+  const [resetPhrase, setResetPhrase] = useState('');
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => {
+      const user = data.session?.user;
+      if (user) {
+        setSession({ id: user.id, email: user.email });
+        setAccountEmail(user.email || '');
+      }
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, authSession) => {
+      const user = authSession?.user;
+      setSession(user ? { id: user.id, email: user.email } : null);
+      setAccountEmail(user?.email || '');
+    });
+    return () => listener.subscription.unsubscribe();
+  }, [supabase]);
+
+  async function loadData() {
+    if (!supabase || !session) return;
+    setLoading(true);
+    setError('');
+    try {
+      const [productRows, salesRows, itemRows, returnRows, loanRows, movementRows, settingsResult] =
+        await Promise.all([
+          fetchAllRows((from, to) =>
+            supabase.from('products').select('*').order('name').range(from, to)
+          ),
+          fetchAllRows((from, to) =>
+            supabase
+              .from('sales')
+              .select('*')
+              .order('created_at', { ascending: false })
+              .range(from, to)
+          ),
+          fetchAllRows((from, to) => supabase.from('sale_items').select('*').range(from, to)),
+          fetchAllRows((from, to) =>
+            supabase
+              .from('returns')
+              .select('*')
+              .order('created_at', { ascending: false })
+              .range(from, to)
+          ),
+          fetchAllRows((from, to) =>
+            supabase
+              .from('loans')
+              .select('*')
+              .order('created_at', { ascending: false })
+              .range(from, to)
+          ),
+          fetchAllRows((from, to) =>
+            supabase.from('stock_movements').select('product_id,quantity').range(from, to)
+          ),
+          supabase.from('business_settings').select('*').maybeSingle()
+        ]);
+      if (settingsResult.error) throw new Error(settingsResult.error.message);
+      const movements = movementRows;
+      const stockByProduct = new Map<string, number>();
+      movements.forEach((movement) =>
+        stockByProduct.set(
+          movement.product_id,
+          (stockByProduct.get(movement.product_id) || 0) + Number(movement.quantity)
+        )
+      );
+      const nextProducts = productRows.map((product) => ({
+        ...product,
+        purchase_cost: Number(product.purchase_cost),
+        sale_price: Number(product.sale_price),
+        minimum_stock: Number(product.minimum_stock),
+        stock: Number((stockByProduct.get(product.id) || 0).toFixed(3))
+      }));
+      const items = itemRows;
+      setProducts(nextProducts);
+      setSales(
+        salesRows.map((sale) => ({
+          ...sale,
+          net_total: Number(sale.net_total),
+          items: items
+            .filter((item) => item.sale_id === sale.id)
+            .map((item) => ({
+              ...item,
+              quantity: Number(item.quantity),
+              unit_price: Number(item.unit_price),
+              line_total: Number(item.line_total),
+              purchase_cost_snapshot: Number(item.purchase_cost_snapshot),
+              cost_total_snapshot: Number(item.cost_total_snapshot)
+            }))
+        }))
+      );
+      setReturns(
+        returnRows.map((row) => ({
+          ...row,
+          quantity: Number(row.quantity),
+          refund_amount: Number(row.refund_amount),
+          cost_amount_snapshot: Number(row.cost_amount_snapshot)
+        }))
+      );
+      setLoans(
+        loanRows.map((loan) => ({
+          ...loan,
+          amount: Number(loan.amount),
+          paid_amount: Number(loan.paid_amount),
+          remaining_amount: Number(loan.remaining_amount)
+        }))
+      );
+      if (settingsResult.data) {
+        const nextSettings = {
+          business_name: settingsResult.data.business_name,
+          address: settingsResult.data.address,
+          phone1: settingsResult.data.phone1,
+          phone2: settingsResult.data.phone2,
+          receipt_footer: settingsResult.data.receipt_footer
+        };
+        setSettings(nextSettings);
+        setBusinessForm(nextSettings);
+      } else {
+        setSettings(defaultSettings);
+        setBusinessForm(defaultSettings);
+      }
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+    setLoading(false);
+  }
+
+  const loadDataEffect = useEffectEvent(loadData);
+  useEffect(() => {
+    if (!session) return;
+    const timer = window.setTimeout(() => void loadDataEffect(), 0);
+    return () => window.clearTimeout(timer);
+  }, [session]);
+
+  async function runAction<T>(action: () => Promise<T>, success: string): Promise<T | null> {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await action();
+      setMessage(success);
+      await loadData();
+      return result;
+    } catch (cause) {
+      setError(errorText(cause));
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function authenticate(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    setAuthBusy(true);
+    setError('');
+    setMessage('');
+    const result = await supabase.auth.signInWithPassword({ email, password });
+    if (result.error) {
+      setError(result.error.message);
+    } else {
+      const { error: claimError } = await supabase.rpc('claim_shop_admin');
+      if (claimError) {
+        await supabase.auth.signOut();
+        setError(claimError.message);
+      }
+    }
+    setAuthBusy(false);
+  }
+
+  async function updateCredentials(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || !session) return;
+    const nextEmail = accountEmail.trim().toLowerCase();
+    const changingEmail = nextEmail !== (session.email || '').toLowerCase();
+    if (!changingEmail && !newPassword) {
+      setError('Enter a new login email or password.');
+      return;
+    }
+    if (newPassword && newPassword.length < 8) {
+      setError('Use a password with at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setError('The new passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setMessage('');
+    const { error: updateError } = await supabase.auth.updateUser({
+      ...(changingEmail ? { email: nextEmail } : {}),
+      ...(newPassword ? { password: newPassword } : {})
+    });
+    if (updateError) setError(updateError.message);
+    else {
+      setNewPassword('');
+      setConfirmNewPassword('');
+      setMessage(changingEmail ? 'Check the new email inbox to confirm the login change.' : 'Password changed.');
+    }
+    setBusy(false);
+  }
+
+  const activeProducts = products.filter((product) => product.active);
+  const visibleProducts = products.filter((product) => {
+    const matchesSearch = `${product.name} ${product.unit}`.toLowerCase().includes(search.toLowerCase());
+    if (!matchesSearch) return false;
+    if (productFilter === 'ACTIVE') return product.active;
+    if (productFilter === 'INACTIVE') return !product.active;
+    if (productFilter === 'LOW_STOCK') return product.active && product.stock <= product.minimum_stock;
+    return true;
+  });
+  const returnSales = sales.filter((sale) => sale.status === 'CONFIRMED');
+  const selectedReturnSale = returnSales.find((sale) => sale.id === returnForm.saleId);
+  const selectedReturnItem = selectedReturnSale?.items.find(
+    (item) => item.product_id === returnForm.productId
+  );
+  const todaySales = sales.filter(
+    (sale) => sale.sale_date === today() && sale.status === 'CONFIRMED'
+  );
+  const todayRefunds = returns.filter((row) => row.movement_date === today());
+  const todayNetSales = roundMoney(
+    todaySales.reduce((sum, sale) => sum + sale.net_total, 0) -
+      todayRefunds.reduce((sum, row) => sum + row.refund_amount, 0)
+  );
+  const todayProfit = roundMoney(
+    todaySales.reduce(
+      (sum, sale) =>
+        sum +
+        sale.items.reduce(
+          (itemSum, item) => itemSum + item.line_total - item.cost_total_snapshot,
+          0
+        ),
+      0
+    ) -
+      todayRefunds.reduce(
+        (sum, row) => sum + row.refund_amount - (row.restock ? row.cost_amount_snapshot : 0),
+        0
+      )
+  );
+  const stockValue = roundMoney(
+    products.reduce((sum, product) => sum + Math.max(0, product.stock) * product.purchase_cost, 0)
+  );
+  const lowStock = products.filter(
+    (product) => product.active && product.stock <= product.minimum_stock
+  );
+  const reportSales = sales.filter(
+    (sale) => sale.sale_date >= reportStart && sale.sale_date <= reportEnd
+  );
+  const reportReturns = returns.filter(
+    (row) => row.movement_date >= reportStart && row.movement_date <= reportEnd
+  );
+  const reportNet = roundMoney(
+    reportSales
+      .filter((sale) => sale.status === 'CONFIRMED')
+      .reduce((sum, sale) => sum + sale.net_total, 0) -
+      reportReturns.reduce((sum, row) => sum + row.refund_amount, 0)
+  );
+  const reportProfit = roundMoney(
+    reportSales
+      .filter((sale) => sale.status === 'CONFIRMED')
+      .reduce(
+        (sum, sale) =>
+          sum + sale.items.reduce((n, item) => n + item.line_total - item.cost_total_snapshot, 0),
+        0
+      ) -
+      reportReturns.reduce(
+        (sum, row) => sum + row.refund_amount - (row.restock ? row.cost_amount_snapshot : 0),
+        0
+      )
+  );
+  const outstandingIn = roundMoney(
+    loans
+      .filter((loan) => loan.type === 'GIVEN')
+      .reduce((sum, loan) => sum + loan.remaining_amount, 0)
+  );
+  const outstandingOut = roundMoney(
+    loans
+      .filter((loan) => loan.type === 'TAKEN')
+      .reduce((sum, loan) => sum + loan.remaining_amount, 0)
+  );
+
+  async function createProduct(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || !session) return;
+    try {
+      const purchaseCost =
+        editingProduct && editingProduct.stock > 0
+          ? editingProduct.purchase_cost
+          : amount(newProduct.purchase_cost, 'Buying rate');
+      const salePrice = amount(newProduct.sale_price, 'Selling rate');
+      const minimum = quantity(newProduct.minimum_stock, true);
+      if (!newProduct.name.trim() || !newProduct.unit.trim())
+        throw new Error('Product name and selling unit are required.');
+      const openingStock = quantity(newProduct.opening_stock || '0', true);
+      const saved = await runAction(async () => {
+        const response = editingProduct
+          ? await supabase.rpc('update_product', {
+              p_product_id: editingProduct.id,
+              p_name: newProduct.name.trim(),
+              p_unit: newProduct.unit.trim(),
+              p_purchase_cost: purchaseCost,
+              p_sale_price: salePrice,
+              p_minimum_stock: minimum,
+              p_active: editingProduct.active
+            })
+          : await supabase.rpc('create_product', {
+              p_name: newProduct.name.trim(),
+              p_unit: newProduct.unit.trim(),
+              p_purchase_cost: purchaseCost,
+              p_sale_price: salePrice,
+              p_minimum_stock: minimum,
+              p_opening_stock: openingStock
+            });
+        if (response.error) throw response.error;
+        return true;
+      }, editingProduct ? 'Product updated.' : 'Product saved with opening stock.');
+      if (!saved) return;
+      setEditingProduct(null);
+      setNewProduct({
+        name: '',
+        unit: 'Box',
+        purchase_cost: '',
+        sale_price: '',
+        minimum_stock: '10',
+        opening_stock: ''
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  function beginEditProduct(product: Product) {
+    setEditingProduct(product);
+    setNewProduct({
+      name: product.name,
+      unit: product.unit,
+      purchase_cost: String(product.purchase_cost),
+      sale_price: String(product.sale_price),
+      minimum_stock: String(product.minimum_stock),
+      opening_stock: ''
+    });
+    setError('');
+    setMessage('');
+    window.requestAnimationFrame(() => document.getElementById('product-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+  }
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (event.key !== 'F2' || document.querySelector('[role=dialog]')) return;
+      event.preventDefault();
+      setTab('sales');
+      setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
+  }, []);
+
+  async function toggleProductActive(product: Product) {
+    if (!supabase) return;
+    await runAction(async () => {
+      const { error: rpcError } = await supabase.rpc('update_product', {
+        p_product_id: product.id,
+        p_name: product.name,
+        p_unit: product.unit,
+        p_purchase_cost: product.purchase_cost,
+        p_sale_price: product.sale_price,
+        p_minimum_stock: product.minimum_stock,
+        p_active: !product.active
+      });
+      if (rpcError) throw rpcError;
+    }, product.active ? 'Product deactivated.' : 'Product activated.');
+  }
+
+  async function createSale(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    try {
+      const items = cart
+        .filter((line) => line.productId)
+        .map((line) => ({
+          productId: line.productId,
+          quantity: quantity(line.quantity),
+          ...(line.unitPrice ? { unitPrice: Number(line.unitPrice) } : {})
+        }));
+      if (!items.length) throw new Error('Add at least one product to the bill.');
+      if (new Set(items.map((item) => item.productId)).size !== items.length)
+        throw new Error('Each product can appear once. Edit its existing line quantity.');
+      const saved = await runAction(async () => {
+        const { data, error: rpcError } = await supabase.rpc('create_sale', {
+          p_date: today(),
+          p_items: items,
+          p_notes: null
+        });
+        if (rpcError) throw rpcError;
+        return data as { invoiceNumber: string; netTotal: number };
+      }, 'Sale saved and stock updated atomically.');
+      if (!saved) return;
+      setReceipt({
+        kind: 'SALE',
+        number: saved.invoiceNumber,
+        date: today(),
+        totalLabel: 'TOTAL',
+        total: Number(saved.netTotal),
+        items: items.map((line) => {
+          const product = products.find((candidate) => candidate.id === line.productId)!;
+          const rate = line.unitPrice ?? product.sale_price;
+          return {
+            name: product.name,
+            unit: product.unit,
+            quantity: line.quantity,
+            rate,
+            amount: lineAmount(line.quantity, rate)
+          };
+        })
+      });
+      setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  async function addStock(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    try {
+      quantity(stockForm.quantity);
+      await runAction(async () => {
+        const { error: rpcError } = await supabase.rpc('record_stock', {
+          p_product_id: stockForm.productId,
+          p_quantity: Number(stockForm.quantity),
+          p_purchase_cost: Number(stockForm.purchaseCost),
+          p_date: stockForm.date,
+          p_movement_type: stockForm.movementType,
+          p_reference: null,
+          p_notes: stockForm.notes || null
+        });
+        if (rpcError) throw rpcError;
+      }, 'Stock recorded and average buying cost recalculated.');
+      setStockForm({
+        productId: '',
+        quantity: '',
+        purchaseCost: '',
+        date: today(),
+        movementType: 'PURCHASE',
+        notes: ''
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  async function adjustStock(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    try {
+      if (!adjustForm.productId) throw new Error('Choose a product.');
+      if (!adjustForm.reason.trim()) throw new Error('Enter a reason for the stock adjustment.');
+      if (adjustForm.type === 'PHYSICAL') quantity(adjustForm.physicalCount, true);
+      else quantity(adjustForm.quantity);
+      await runAction(async () => {
+        const { error: rpcError } = await supabase.rpc('adjust_stock', {
+          p_product_id: adjustForm.productId,
+          p_adjustment_type: adjustForm.type,
+          p_quantity: adjustForm.type === 'PHYSICAL' ? null : Number(adjustForm.quantity),
+          p_physical_count: adjustForm.type === 'PHYSICAL' ? Number(adjustForm.physicalCount) : null,
+          p_reason: adjustForm.reason.trim(),
+          p_date: adjustForm.date,
+          p_notes: null
+        });
+        if (rpcError) throw rpcError;
+      }, 'Stock count reconciled and movement recorded.');
+      setAdjustForm({ productId: '', type: 'PHYSICAL', quantity: '', physicalCount: '', reason: '', date: today() });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  async function createReturn(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    try {
+      const qty = quantity(returnForm.quantity);
+      if (!returnForm.productId) throw new Error('Choose a product to return.');
+      const selectedProduct = products.find((product) => product.id === returnForm.productId);
+      const saved = await runAction(async () => {
+        const { data, error: rpcError } = await supabase.rpc('create_return', {
+          p_date: returnForm.date,
+          p_reason: returnForm.reason,
+          p_sale_id: returnForm.saleId || null,
+          p_items: [
+            {
+              productId: returnForm.productId,
+              quantity: qty,
+              restock: returnForm.restock,
+              ...(!returnForm.saleId ? { refundAmount: Number(returnForm.refund) } : {})
+            }
+          ],
+          p_notes: null
+        });
+        if (rpcError) throw rpcError;
+        return data as { billNumber: string; refundTotal: number };
+      }, 'Return saved with its refund and stock changes.');
+      if (!saved) return;
+      const refundTotal = Number(saved.refundTotal);
+      setReceipt({
+        kind: 'RETURN',
+        number: saved.billNumber,
+        date: returnForm.date,
+        reference: selectedReturnSale?.invoice_number,
+        totalLabel: 'REFUND',
+        total: refundTotal,
+        notes: `${returnForm.reason}${returnForm.restock ? '' : ' · Damaged / not added to stock'}`,
+        items: [{
+          name: selectedReturnItem?.product_name_snapshot || selectedProduct?.name || 'Returned item',
+          unit: selectedReturnItem?.unit_snapshot || selectedProduct?.unit || '',
+          quantity: qty,
+          rate: qty ? refundTotal / qty : 0,
+          amount: refundTotal,
+          note: returnForm.restock ? undefined : 'Damaged / not added to stock'
+        }]
+      });
+      setReturnForm({
+        saleId: '',
+        productId: '',
+        quantity: '',
+        restock: true,
+        reason: 'Customer return',
+        date: today(),
+        refund: ''
+      });
+    } catch (cause) {
+      setError(errorText(cause));
+    }
+  }
+
+  async function createLoan(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    await runAction(async () => {
+      const { error: rpcError } = await supabase.rpc('create_loan', {
+        p_person_name: loanForm.person,
+        p_type: loanForm.type,
+        p_amount: Number(loanForm.amount),
+        p_date: loanForm.date,
+        p_notes: null
+      });
+      if (rpcError) throw rpcError;
+    }, 'Money record saved.');
+    setLoanForm({ person: '', type: 'GIVEN', amount: '', date: today() });
+  }
+
+  async function settleLoan(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase) return;
+    await runAction(async () => {
+      const { error: rpcError } = await supabase.rpc('settle_loan', {
+        p_loan_id: settlement.loanId,
+        p_amount: Number(settlement.amount),
+        p_date: settlement.date,
+        p_notes: null
+      });
+      if (rpcError) throw rpcError;
+    }, 'Repayment saved and balance updated.');
+    setSettlement({ loanId: '', amount: '', date: today() });
+  }
+
+  async function saveSettings(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || !session) return;
+    await runAction(async () => {
+      const { error: rpcError } = await supabase.rpc('save_business_settings', {
+        p_business_name: businessForm.business_name,
+        p_address: businessForm.address,
+        p_phone1: businessForm.phone1,
+        p_phone2: businessForm.phone2,
+        p_receipt_footer: businessForm.receipt_footer
+      });
+      if (rpcError) throw rpcError;
+      setSettings(businessForm);
+    }, 'Business details saved.');
+  }
+
+  async function resetShopData(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!supabase || resetPhrase !== 'RESET AZIZ SHOP') {
+      setError('Type RESET AZIZ SHOP exactly to continue.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const [settingsBackup, productBackup, stockBackup, adjustmentBackup, invoiceBackup, returnSequenceBackup, salesBackup, itemsBackup, returnsBackup, loansBackup, settlementsBackup, auditBackup] = await Promise.all([
+        supabase.from('business_settings').select('*').maybeSingle(),
+        fetchAllRows((from, to) => supabase.from('products').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('stock_movements').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('stock_adjustments').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('invoice_sequences').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('return_sequences').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('sales').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('sale_items').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('returns').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('loans').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('loan_settlements').select('*').range(from, to)),
+        fetchAllRows((from, to) => supabase.from('audit_log').select('*').range(from, to))
+      ]);
+      if (settingsBackup.error) throw new Error(settingsBackup.error.message);
+      const backup = {
+        exportedAt: new Date().toISOString(),
+        business_settings: settingsBackup.data,
+        products: productBackup,
+        stock_movements: stockBackup,
+        stock_adjustments: adjustmentBackup,
+        invoice_sequences: invoiceBackup,
+        return_sequences: returnSequenceBackup,
+        sales: salesBackup,
+        sale_items: itemsBackup,
+        returns: returnsBackup,
+        loans: loansBackup,
+        loan_settlements: settlementsBackup,
+        audit_log: auditBackup
+      };
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+      link.download = `aziz-shop-before-reset-${today()}.json`;
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+      const { error: resetError } = await supabase.rpc('reset_shop_data', { p_confirmation: resetPhrase });
+      if (resetError) throw resetError;
+      setResetPhrase('');
+      setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
+      setEditingProduct(null);
+      await loadData();
+      setMessage('All shop data was reset. A full JSON safety export was downloaded. The admin account remains active.');
+    } catch (cause) {
+      setError(`Reset did not complete: ${errorText(cause)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function showPrinterTest() {
+    setReceipt({
+      kind: 'SALE',
+      number: 'PRINTER-TEST',
+      date: today(),
+      totalLabel: 'TOTAL',
+      total: 1475,
+      notes: 'Check both paper edges, small text, and the total.',
+      items: [
+        { name: 'Iranian sweets family box', unit: 'Kg', quantity: 1.5, rate: 150, amount: 225 },
+        { name: 'Washing powder carton', unit: 'Box', quantity: 1, rate: 1250, amount: 1250 }
+      ]
+    });
+  }
+
+  function exportReport() {
+    if (reportStart > reportEnd) return;
+    const rows = [
+      ['Invoice', 'Date', 'Total', 'Status'],
+      ...reportSales.map((sale) => [
+        sale.invoice_number,
+        sale.sale_date,
+        sale.net_total.toFixed(2),
+        sale.status
+      ])
+    ];
+    const csv = rows
+      .map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(','))
+      .join('\r\n');
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    link.download = `Sales_Report_${reportStart}_${reportEnd}.csv`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+  }
+
+  if (!supabase) return <SetupNotice />;
+
+  if (!session)
+    return (
+      <main className="auth-screen">
+        <div className="auth-aside">
+          <div className="brand-mark">
+            A<span>&</span>S
+          </div>
+          <p className="eyebrow">AZIZ & SON / WHOLESALE</p>
+          <h1>
+            Every item.
+            <br />
+            Every rupee.
+            <br />
+            <i>In order.</i>
+          </h1>
+          <p className="auth-note">
+            Stock, sales and shop money, kept together in one clear ledger.
+          </p>
+          <div className="auth-stamp">
+            EST. 1998 <span>•</span> SHOP RECORDS
+          </div>
+        </div>
+        <section className="auth-main">
+          <div className="auth-form-wrap">
+            <p className="eyebrow">PRIVATE SHOP WORKSPACE</p>
+            <h2>Sign in to your shop</h2>
+            <p className="muted">Your records are private to your account.</p>
+            {error && <Notice kind="error">{error}</Notice>}
+            {message && <Notice>{message}</Notice>}
+            <form onSubmit={authenticate} className="form-stack">
+              <Field label="Email">
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  required
+                  autoComplete="email"
+                  placeholder="aziz@gmail.com"
+                />
+              </Field>
+              <Field label="Password">
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  required
+                  autoComplete="current-password"
+                />
+              </Field>
+              <button className="button primary full" disabled={authBusy}>
+                {authBusy ? 'Please wait…' : 'Sign in'}
+              </button>
+            </form>
+            <p className="auth-single-user">Single administrator account</p>
+          </div>
+          <div className="auth-foot">
+            AZIZ & SON <span>SECURE CLOUD RECORDS</span>
+          </div>
+        </section>
+      </main>
+    );
+
+  const title = navItems.find((item) => item.id === tab)?.label || 'Overview';
+  return (
+    <main className="app-shell">
+      <aside className="sidebar">
+        <a className="brand" href="#overview" onClick={() => setTab('overview')}>
+          <span className="brand-icon">
+            A<span>&</span>S
+          </span>
+          <span className="brand-copy">
+            <b>AZIZ & SON</b>
+            <small>WHOLESALE LEDGER</small>
+          </span>
+        </a>
+        <div className="branch-label">
+          WORKSPACE <span>01</span>
+        </div>
+        <nav>
+          {navItems.map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              className={`nav-link ${tab === id ? 'active' : ''}`}
+              onClick={() => setTab(id)}
+            >
+              <Icon size={17} strokeWidth={1.8} />
+              <span>{label}</span>
+              {id === 'stock' && lowStock.length > 0 && (
+                <i className="nav-count">{lowStock.length}</i>
+              )}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-bottom">
+          <div className="connection">
+            <span className="online-dot" /> SUPABASE CONNECTED
+          </div>
+          <button className="account" onClick={() => void supabase.auth.signOut()}>
+            <span className="avatar">{session.email?.slice(0, 1).toUpperCase()}</span>
+            <span>
+              <b>{session.email}</b>
+              <small>Sign out</small>
+            </span>
+            <LogOut size={15} />
+          </button>
+        </div>
+      </aside>
+      <section className="workspace">
+        <header className="topbar">
+          <div>
+            <p className="crumb">
+              SHOP FLOOR <span>/</span> {title.toUpperCase()}
+            </p>
+            <h1>{tab === 'overview' ? settings.business_name : title}</h1>
+          </div>
+          <div className="top-actions">
+            <span className="date-chip">
+              {new Intl.DateTimeFormat('en', {
+                weekday: 'short',
+                day: '2-digit',
+                month: 'short',
+                year: 'numeric'
+              }).format(new Date())}
+            </span>
+            <button
+              className="button primary"
+              onClick={() => {
+                setTab('sales');
+                setCart([{ productId: '', quantity: '1', unitPrice: '' }]);
+              }}
+            >
+              <Plus size={16} /> New sale <kbd>F2</kbd>
+            </button>
+          </div>
+        </header>
+        <div className="content">
+          {error && <Notice kind="error">{error}</Notice>}
+          {message && <Notice>{message}</Notice>}
+          {loading && (
+            <div className="loading-line">
+              <span /> Refreshing shop records…
+            </div>
+          )}
+          {tab === 'overview' && (
+            <>
+              <section className="welcome-band">
+                <div>
+                  <p className="eyebrow">DAILY BOOK / {today()}</p>
+                  <h2>
+                    Good business starts with
+                    <br />
+                    <em>clear numbers.</em>
+                  </h2>
+                  <p>Today’s shop activity, returned goods and stock position.</p>
+                </div>
+                <div className="welcome-graphic" aria-hidden="true">
+                  <div className="receipt-slip">
+                    <span>AZIZ & SON</span>
+                    <b>Rs. {formatQuantity(Math.abs(todayNetSales))}</b>
+                    <i>TODAY&apos;S NET</i>
+                    <div />
+                  </div>
+                  <div className="graphic-seal">
+                    A<span>&</span>S
+                  </div>
+                </div>
+              </section>
+              <div className="metric-grid">
+                <Metric
+                  label="Net sales today"
+                  value={formatMoney(todayNetSales)}
+                  detail={`${todaySales.length} saved ${todaySales.length === 1 ? 'bill' : 'bills'}`}
+                  icon={ShoppingCart}
+                  tone="green"
+                />
+                <Metric
+                  label="Customer refunds"
+                  value={formatMoney(todayRefunds.reduce((sum, row) => sum + row.refund_amount, 0))}
+                  detail={`${todayRefunds.length} return lines today`}
+                  icon={Undo2}
+                  tone="rust"
+                />
+                <Metric
+                  label="Trading profit"
+                  value={formatMoney(todayProfit)}
+                  detail="After refunds, before expenses"
+                  icon={ChartNoAxesCombined}
+                  tone="gold"
+                />
+                <Metric
+                  label="Stock on hand"
+                  value={formatMoney(stockValue)}
+                  detail={`${products.filter((product) => product.active).length} active products`}
+                  icon={Boxes}
+                  tone="ink"
+                />
+              </div>
+              <div className="overview-grid">
+                <section className="surface">
+                  <SectionHead
+                    title="Recent bills"
+                    eyebrow="SALES BOOK"
+                    action={
+                      <button className="text-button" onClick={() => setTab('sales')}>
+                        Full sales book <ArrowLeftRight size={14} />
+                      </button>
+                    }
+                  />
+                  <SalesTable sales={sales.slice(0, 7)} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
+                </section>
+                <section className="surface stock-watch">
+                  <SectionHead
+                    title="Needs attention"
+                    eyebrow="STOCK WATCH"
+                    action={
+                      <button
+                        className="icon-button"
+                        title="Open stock"
+                        onClick={() => setTab('stock')}
+                      >
+                        <ArrowLeftRight size={16} />
+                      </button>
+                    }
+                  />
+                  {lowStock.length ? (
+                    lowStock.slice(0, 6).map((product) => (
+                      <div className="watch-row" key={product.id}>
+                        <span className={`status-dot ${product.stock <= 0 ? 'danger' : ''}`} />
+                        <div>
+                          <b>{product.name}</b>
+                          <small>
+                            {product.stock <= 0
+                              ? 'Out of stock'
+                              : `Reorder at ${formatQuantity(product.minimum_stock)} ${product.unit}`}
+                          </small>
+                        </div>
+                        <strong>
+                          {formatQuantity(product.stock)} <small>{product.unit}</small>
+                        </strong>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="quiet-empty">
+                      <span>✓</span>
+                      <p>All active products are above their warning level.</p>
+                    </div>
+                  )}
+                  <div className="stock-value">
+                    <span>Current stock value</span>
+                    <b>{formatMoney(stockValue)}</b>
+                  </div>
+                </section>
+              </div>
+              <div className="bottom-grid">
+                <section className="surface">
+                  <SectionHead
+                    title="Latest returns"
+                    eyebrow="RETURNS BOOK"
+                    action={
+                      <button className="text-button" onClick={() => setTab('returns')}>
+                        Open returns <ArrowLeftRight size={14} />
+                      </button>
+                    }
+                  />
+                  {returns.slice(0, 4).map((row) => (
+                    <div className="ledger-row" key={row.id}>
+                      <div className="ledger-icon rust">
+                        <Undo2 size={15} />
+                      </div>
+                      <div>
+                        <b>{row.bill_number}</b>
+                        <small>
+                          {row.product_name_snapshot} · {row.movement_date}
+                        </small>
+                      </div>
+                      <strong className="negative">−{formatMoney(row.refund_amount)}</strong>
+                    </div>
+                  ))}
+                  {!returns.length && <EmptyState text="No customer returns have been recorded." />}
+                </section>
+                <section className="surface note-panel">
+                  <div className="note-glyph">
+                    <FileText size={19} />
+                  </div>
+                  <div>
+                    <p className="eyebrow">SHOP NOTE</p>
+                    <h3>Money ledger</h3>
+                    <p>
+                      Outstanding to receive <b>{formatMoney(outstandingIn)}</b>
+                      <br />
+                      Outstanding to pay <b>{formatMoney(outstandingOut)}</b>
+                    </p>
+                    <button className="text-button" onClick={() => setTab('money')}>
+                      Review balances <ArrowLeftRight size={14} />
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
+          {tab === 'sales' && (
+            <div className="page-grid">
+              <section className="surface form-surface">
+                <SectionHead title="Write a sales bill" eyebrow="NEW TRANSACTION" />
+                <p className="section-copy">
+                  Prices and cost are recorded in the bill when it is saved. Stock is checked again
+                  inside the database transaction.
+                </p>
+                <form onSubmit={createSale} className="form-stack">
+                  <div className="bill-lines">
+                    {cart.map((line, index) => {
+                      const product = products.find((item) => item.id === line.productId);
+                      const lineTotal = product
+                        ? lineAmount(
+                            Number(line.quantity) || 0,
+                            Number(line.unitPrice || product.sale_price)
+                          )
+                        : 0;
+                      return (
+                        <div className="bill-line" key={index}>
+                          <label className="field product-pick">
+                            <span>Product</span>
+                            <select
+                              value={line.productId}
+                              onChange={(event) =>
+                                setCart(
+                                  cart.map((item, itemIndex) =>
+                                    itemIndex === index
+                                      ? {
+                                          ...item,
+                                          productId: event.target.value,
+                                          unitPrice:
+                                            products
+                                              .find((entry) => entry.id === event.target.value)
+                                              ?.sale_price.toFixed(2) || ''
+                                        }
+                                      : item
+                                  )
+                                )
+                              }
+                            >
+                              <option value="">Choose product</option>
+                              {activeProducts.map((item) => (
+                                <option key={item.id} value={item.id} disabled={item.stock <= 0}>
+                                  {item.name} · {formatQuantity(item.stock)} {item.unit}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <Field label="Quantity">
+                            <input
+                              type="number"
+                              min="0.001"
+                              step="0.001"
+                              value={line.quantity}
+                              onChange={(event) =>
+                                setCart(
+                                  cart.map((item, itemIndex) =>
+                                    itemIndex === index
+                                      ? { ...item, quantity: event.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                            />
+                          </Field>
+                          <Field label="Rate (Rs.)">
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.01"
+                              value={line.unitPrice}
+                              onChange={(event) =>
+                                setCart(
+                                  cart.map((item, itemIndex) =>
+                                    itemIndex === index
+                                      ? { ...item, unitPrice: event.target.value }
+                                      : item
+                                  )
+                                )
+                              }
+                            />
+                          </Field>
+                          <div className="line-total">
+                            <small>LINE TOTAL</small>
+                            <b>{formatMoney(lineTotal)}</b>
+                          </div>
+                          <button
+                            type="button"
+                            className="icon-button remove-line"
+                            title="Remove line"
+                            onClick={() =>
+                              setCart(cart.filter((_item, itemIndex) => itemIndex !== index))
+                            }
+                          >
+                            <X size={15} />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button
+                    type="button"
+                    className="text-button add-line"
+                    onClick={() =>
+                      setCart([...cart, { productId: '', quantity: '1', unitPrice: '' }])
+                    }
+                  >
+                    <Plus size={15} /> Add another item
+                  </button>
+                  <div className="bill-total">
+                    <span>Bill total</span>
+                    <strong>
+                      {formatMoney(
+                        cart.reduce((sum, line) => {
+                          const product = products.find((item) => item.id === line.productId);
+                          return (
+                            sum +
+                            (product
+                              ? lineAmount(
+                                  Number(line.quantity) || 0,
+                                  Number(line.unitPrice || product.sale_price)
+                                )
+                              : 0)
+                          );
+                        }, 0)
+                      )}
+                    </strong>
+                  </div>
+                  <button className="button primary" disabled={busy || !activeProducts.length}>
+                    <ShoppingCart size={16} /> Save bill
+                  </button>
+                </form>
+              </section>
+              <aside className="surface help-surface">
+                <p className="eyebrow">BILLING NOTES</p>
+                <h3>Keep the sale true to the shelf.</h3>
+                <p>
+                  One product per bill line. The database validates available stock at save time, so
+                  another open session cannot silently oversell it.
+                </p>
+                <div className="help-rule" />
+                <p>
+                  Saved lines keep product name, unit, sale rate and buying cost snapshots. Future
+                  price changes will not rewrite past profit.
+                </p>
+                <div className="inline-stat">
+                  <span>Sellable items now</span>
+                  <b>{activeProducts.filter((item) => item.stock > 0).length}</b>
+                </div>
+              </aside>
+              <section className="surface span-all">
+                <SectionHead title="Sales book" eyebrow="LATEST 300 BILLS" />
+                <SalesTable sales={sales} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
+              </section>
+            </div>
+          )}
+          {tab === 'products' && (
+            <div className="page-grid">
+              <section id="product-form" className="surface form-surface">
+                <SectionHead title={editingProduct ? 'Edit product' : 'Add a product'} eyebrow="PRODUCT CATALOG" />
+                <form className="form-stack" onSubmit={createProduct}>
+                  <Field label="Product name">
+                    <input
+                      value={newProduct.name}
+                      onChange={(event) =>
+                        setNewProduct({ ...newProduct, name: event.target.value })
+                      }
+                      required
+                      maxLength={160}
+                    />
+                  </Field>
+                  <div className="form-row">
+                    <Field label="Selling unit">
+                      <input
+                        value={newProduct.unit}
+                        onChange={(event) =>
+                          setNewProduct({ ...newProduct, unit: event.target.value })
+                        }
+                        required
+                        maxLength={40}
+                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                      />
+                    </Field>
+                    <Field label="Minimum stock">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={newProduct.minimum_stock}
+                        onChange={(event) =>
+                          setNewProduct({ ...newProduct, minimum_stock: event.target.value })
+                        }
+                      />
+                    </Field>
+                  </div>
+                  <div className="form-row">
+                    <Field label="Buying rate (Rs.)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={newProduct.purchase_cost}
+                        onChange={(event) =>
+                          setNewProduct({ ...newProduct, purchase_cost: event.target.value })
+                        }
+                        required
+                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                      />
+                    </Field>
+                    <Field label="Selling rate (Rs.)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={newProduct.sale_price}
+                        onChange={(event) =>
+                          setNewProduct({ ...newProduct, sale_price: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  {!editingProduct && (
+                    <Field label="Opening stock (optional)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={newProduct.opening_stock}
+                        onChange={(event) => setNewProduct({ ...newProduct, opening_stock: event.target.value })}
+                      />
+                    </Field>
+                  )}
+                  <button className="button primary" disabled={busy}>
+                    {editingProduct ? <Pencil size={16} /> : <Plus size={16} />}
+                    {editingProduct ? 'Save changes' : 'Save product'}
+                  </button>
+                  {editingProduct && <button className="button secondary" type="button" onClick={() => { setEditingProduct(null); setNewProduct({ name: '', unit: 'Box', purchase_cost: '', sale_price: '', minimum_stock: '10', opening_stock: '' }); }}>Cancel edit</button>}
+                </form>
+              </section>
+              <section className="surface form-surface">
+                <SectionHead title="Correct a count" eyebrow="STOCK ADJUSTMENT" />
+                <p className="section-copy">Count the shelf first. A reason is saved with every correction.</p>
+                <form onSubmit={adjustStock} className="form-stack">
+                  <Field label="Product">
+                    <select value={adjustForm.productId} onChange={(event) => setAdjustForm({ ...adjustForm, productId: event.target.value })} required>
+                      <option value="">Choose product</option>
+                      {products.map((product) => <option key={product.id} value={product.id}>{product.name} · {formatQuantity(product.stock)} {product.unit}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="Adjustment method">
+                    <select value={adjustForm.type} onChange={(event) => setAdjustForm({ ...adjustForm, type: event.target.value })}>
+                      <option value="PHYSICAL">Set counted quantity</option>
+                      <option value="INCREASE">Increase by quantity</option>
+                      <option value="DECREASE">Decrease by quantity</option>
+                    </select>
+                  </Field>
+                  {adjustForm.type === 'PHYSICAL' ? (
+                    <Field label="Physical count"><input type="number" min="0" step="0.001" value={adjustForm.physicalCount} onChange={(event) => setAdjustForm({ ...adjustForm, physicalCount: event.target.value })} required /></Field>
+                  ) : (
+                    <Field label="Adjustment quantity"><input type="number" min="0.001" step="0.001" value={adjustForm.quantity} onChange={(event) => setAdjustForm({ ...adjustForm, quantity: event.target.value })} required /></Field>
+                  )}
+                  <div className="form-row">
+                    <Field label="Date"><input type="date" value={adjustForm.date} onChange={(event) => setAdjustForm({ ...adjustForm, date: event.target.value })} required /></Field>
+                    <Field label="Reason"><input value={adjustForm.reason} onChange={(event) => setAdjustForm({ ...adjustForm, reason: event.target.value })} required /></Field>
+                  </div>
+                  <button className="button secondary" disabled={busy}><ArrowLeftRight size={15} /> Save adjustment</button>
+                </form>
+              </section>
+              <section className="surface help-surface">
+                <p className="eyebrow">UNIT DISCIPLINE</p>
+                <h3>Choose once. Use consistently.</h3>
+                <p>
+                  The app will not turn cartons into pieces automatically. Record sales and
+                  inventory in the product’s chosen unit.
+                </p>
+                <div className="rule-list">
+                  <span>Box stays box</span>
+                  <span>Kg stays kg</span>
+                  <span>Fractional quantities allowed to 3 decimals</span>
+                </div>
+              </section>
+              <section className="surface span-all">
+                <div className="section-head">
+                  <div>
+                    <p className="eyebrow">{products.length} PRODUCTS</p>
+                    <h2>Product list</h2>
+                  </div>
+                  <label className="search-field">
+                    <Search size={15} />
+                    <input
+                      placeholder="Find a product"
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                    />
+                  </label>
+                  <select className="compact-select" aria-label="Filter products" value={productFilter} onChange={(event) => setProductFilter(event.target.value as typeof productFilter)}>
+                    <option value="ALL">All products</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                    <option value="LOW_STOCK">Low stock</option>
+                  </select>
+                </div>
+                <ProductsTable products={visibleProducts} onEdit={beginEditProduct} onToggleActive={toggleProductActive} />
+              </section>
+            </div>
+          )}
+          {tab === 'stock' && (
+            <div className="page-grid">
+              <section className="surface form-surface">
+                <SectionHead title="Receive stock" eyebrow="PURCHASE / OPENING STOCK" />
+                <p className="section-copy">
+                  Purchase entries update the moving weighted-average buying cost.
+                </p>
+                <form onSubmit={addStock} className="form-stack">
+                  <Field label="Product">
+                    <select
+                      value={stockForm.productId}
+                      onChange={(event) =>
+                        setStockForm({ ...stockForm, productId: event.target.value })
+                      }
+                      required
+                    >
+                      <option value="">Choose product</option>
+                      {products.map((product) => (
+                        <option key={product.id} value={product.id}>
+                          {product.name} · {formatQuantity(product.stock)} {product.unit}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  <div className="form-row">
+                    <Field label="Entry type">
+                      <select
+                        value={stockForm.movementType}
+                        onChange={(event) =>
+                          setStockForm({ ...stockForm, movementType: event.target.value })
+                        }
+                      >
+                        <option value="PURCHASE">Purchase / restock</option>
+                        <option value="OPENING">Opening stock</option>
+                      </select>
+                    </Field>
+                    <Field label="Date">
+                      <input
+                        type="date"
+                        value={stockForm.date}
+                        onChange={(event) =>
+                          setStockForm({ ...stockForm, date: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  <div className="form-row">
+                    <Field label="Quantity">
+                      <input
+                        type="number"
+                        min="0.001"
+                        step="0.001"
+                        value={stockForm.quantity}
+                        onChange={(event) =>
+                          setStockForm({ ...stockForm, quantity: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                    <Field label="Buying rate (Rs.)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={stockForm.purchaseCost}
+                        onChange={(event) =>
+                          setStockForm({ ...stockForm, purchaseCost: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Note">
+                    <input
+                      value={stockForm.notes}
+                      onChange={(event) =>
+                        setStockForm({ ...stockForm, notes: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <button className="button primary" disabled={busy}>
+                    <PackagePlus size={16} /> Record stock
+                  </button>
+                </form>
+              </section>
+              <section className="surface help-surface">
+                <p className="eyebrow">WEIGHTED AVERAGE</p>
+                <h3>New stock changes the current cost.</h3>
+                <p>
+                  Average = (old quantity × old cost + received quantity × new cost) ÷ total
+                  quantity.
+                </p>
+                <div className="inline-stat">
+                  <span>Stock value now</span>
+                  <b>{formatMoney(stockValue)}</b>
+                </div>
+              </section>
+              <section className="surface span-all">
+                <SectionHead
+                  title="Current inventory"
+                  eyebrow={`${products.filter((item) => item.active).length} ACTIVE ITEMS`}
+                />
+                <ProductsTable products={products} onEdit={beginEditProduct} onToggleActive={toggleProductActive} />
+              </section>
+            </div>
+          )}
+          {tab === 'returns' && (
+            <div className="page-grid">
+              <section className="surface form-surface">
+                <SectionHead title="Record a return" eyebrow="CUSTOMER REFUND" />
+                <form onSubmit={createReturn} className="form-stack">
+                  <Field label="Original sales bill (optional)">
+                    <select
+                      value={returnForm.saleId}
+                      onChange={(event) =>
+                        setReturnForm({
+                          ...returnForm,
+                          saleId: event.target.value,
+                          productId: '',
+                          quantity: '',
+                          refund: ''
+                        })
+                      }
+                    >
+                      <option value="">No original bill</option>
+                      {returnSales.map((sale) => (
+                        <option key={sale.id} value={sale.id}>
+                          {sale.invoice_number} · {sale.sale_date} · {formatMoney(sale.net_total)}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                  {returnForm.saleId ? (
+                    <Field label="Returned product">
+                      <select
+                        value={returnForm.productId}
+                        onChange={(event) =>
+                          setReturnForm({
+                            ...returnForm,
+                            productId: event.target.value,
+                            quantity: ''
+                          })
+                        }
+                      >
+                        <option value="">Choose invoice item</option>
+                        {selectedReturnSale?.items.map((item) => {
+                          const returnedQty = returns
+                            .filter(
+                              (row) =>
+                                row.sale_id === returnForm.saleId &&
+                                row.product_id === item.product_id
+                            )
+                            .reduce((sum, row) => sum + row.quantity, 0);
+                          const remaining = Math.max(0, item.quantity - returnedQty);
+                          return (
+                            <option
+                              key={item.product_id}
+                              value={item.product_id}
+                              disabled={!remaining}
+                            >
+                              {item.product_name_snapshot} · {formatQuantity(remaining)}{' '}
+                              {item.unit_snapshot} left
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </Field>
+                  ) : (
+                    <>
+                      <Field label="Product">
+                        <select
+                          value={returnForm.productId}
+                          onChange={(event) =>
+                            setReturnForm({ ...returnForm, productId: event.target.value })
+                          }
+                          required
+                        >
+                          <option value="">Choose product</option>
+                          {products.map((product) => (
+                            <option key={product.id} value={product.id}>
+                              {product.name}
+                            </option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Refund amount (Rs.)">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={returnForm.refund}
+                          onChange={(event) =>
+                            setReturnForm({ ...returnForm, refund: event.target.value })
+                          }
+                          required
+                        />
+                      </Field>
+                    </>
+                  )}
+                  <div className="form-row">
+                    <Field label="Quantity">
+                      <input
+                        type="number"
+                        min="0.001"
+                        step="0.001"
+                        value={returnForm.quantity}
+                        onChange={(event) =>
+                          setReturnForm({ ...returnForm, quantity: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                    <Field label="Return date">
+                      <input
+                        type="date"
+                        value={returnForm.date}
+                        onChange={(event) =>
+                          setReturnForm({ ...returnForm, date: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Reason">
+                    <input
+                      value={returnForm.reason}
+                      onChange={(event) =>
+                        setReturnForm({ ...returnForm, reason: event.target.value })
+                      }
+                      required
+                    />
+                  </Field>
+                  <label className="check-field">
+                    <input
+                      type="checkbox"
+                      checked={returnForm.restock}
+                      onChange={(event) =>
+                        setReturnForm({ ...returnForm, restock: event.target.checked })
+                      }
+                    />
+                    <span>Saleable, add returned goods back to stock</span>
+                  </label>
+                  {selectedReturnItem && (
+                    <div className="refund-preview">
+                      <span>Estimated refund</span>
+                      <b>
+                        {formatMoney(
+                          lineAmount(
+                            Number(returnForm.quantity) || 0,
+                            selectedReturnItem.unit_price
+                          )
+                        )}
+                      </b>
+                      <small>
+                        Final partial return uses any remaining invoice rounding amount.
+                      </small>
+                    </div>
+                  )}
+                  <button className="button primary" disabled={busy}>
+                    <Undo2 size={16} /> Save return
+                  </button>
+                </form>
+              </section>
+              <section className="surface help-surface">
+                <p className="eyebrow">RETURN POLICY</p>
+                <h3>Refunds follow the original bill.</h3>
+                <p>
+                  Linked returns use original prices, cap quantities to the unreturned balance, and
+                  assign any rounding remainder to the final return.
+                </p>
+                <div className="rule-list">
+                  <span>Saleable goods increase stock</span>
+                  <span>Damaged goods do not increase stock</span>
+                  <span>Refund is counted on the return date</span>
+                </div>
+              </section>
+              <section className="surface span-all">
+                <SectionHead title="Return book" eyebrow={`${returns.length} RETURN LINES`} />
+                {returns.length ? (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Return bill</th>
+                          <th>Original invoice</th>
+                          <th>Product</th>
+                          <th>Date</th>
+                          <th>Condition</th>
+                          <th className="align-right">Refund</th>
+                          <th>Receipt</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {returns.map((row) => (
+                          <tr key={row.id}>
+                            <td>
+                              <b>{row.bill_number}</b>
+                            </td>
+                            <td>{row.invoice_number || 'Unlinked'}</td>
+                            <td>
+                              {row.product_name_snapshot}
+                              <small>
+                                {formatQuantity(row.quantity)} {row.unit_snapshot}
+                              </small>
+                            </td>
+                            <td>{row.movement_date}</td>
+                            <td>
+                              <span className={`pill ${row.restock ? 'pill-green' : 'pill-rust'}`}>
+                                {row.restock ? 'Restocked' : 'Damaged'}
+                              </span>
+                            </td>
+                            <td className="align-right numeric">
+                              {formatMoney(row.refund_amount)}
+                            </td>
+                            <td>
+                              <button className="icon-button" type="button" title={`Print ${row.bill_number}`} aria-label={`Print ${row.bill_number}`} onClick={() => setReceipt(savedReturnReceipt(row, returns))}>
+                                <Printer size={15} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <EmptyState text="Saved customer returns will appear here." />
+                )}
+              </section>
+            </div>
+          )}
+          {tab === 'money' && (
+            <div className="page-grid">
+              <section className="surface form-surface">
+                <SectionHead title="Record money" eyebrow="GIVEN / TAKEN" />
+                <form onSubmit={createLoan} className="form-stack">
+                  <Field label="Person or party">
+                    <input
+                      value={loanForm.person}
+                      onChange={(event) => setLoanForm({ ...loanForm, person: event.target.value })}
+                      required
+                    />
+                  </Field>
+                  <div className="form-row">
+                    <Field label="Direction">
+                      <select
+                        value={loanForm.type}
+                        onChange={(event) =>
+                          setLoanForm({
+                            ...loanForm,
+                            type: event.target.value as 'GIVEN' | 'TAKEN'
+                          })
+                        }
+                      >
+                        <option value="GIVEN">Given · to receive</option>
+                        <option value="TAKEN">Taken · to pay</option>
+                      </select>
+                    </Field>
+                    <Field label="Amount (Rs.)">
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={loanForm.amount}
+                        onChange={(event) =>
+                          setLoanForm({ ...loanForm, amount: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Date">
+                    <input
+                      type="date"
+                      value={loanForm.date}
+                      onChange={(event) => setLoanForm({ ...loanForm, date: event.target.value })}
+                      required
+                    />
+                  </Field>
+                  <button className="button primary" disabled={busy}>
+                    <Plus size={16} /> Save money record
+                  </button>
+                </form>
+                <div className="form-divider" />
+                <SectionHead title="Record repayment" eyebrow="RECEIVE / PAY BACK" />
+                <form onSubmit={settleLoan} className="form-stack">
+                  <Field label="Open balance">
+                    <select
+                      value={settlement.loanId}
+                      onChange={(event) =>
+                        setSettlement({ ...settlement, loanId: event.target.value })
+                      }
+                      required
+                    >
+                      <option value="">Choose a balance</option>
+                      {loans
+                        .filter((loan) => loan.remaining_amount > 0)
+                        .map((loan) => (
+                          <option key={loan.id} value={loan.id}>
+                            {loan.person_name} · {loan.type === 'GIVEN' ? 'to receive' : 'to pay'} ·{' '}
+                            {formatMoney(loan.remaining_amount)}
+                          </option>
+                        ))}
+                    </select>
+                  </Field>
+                  <div className="form-row">
+                    <Field label="Amount (Rs.)">
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        value={settlement.amount}
+                        onChange={(event) =>
+                          setSettlement({ ...settlement, amount: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                    <Field label="Date">
+                      <input
+                        type="date"
+                        value={settlement.date}
+                        onChange={(event) =>
+                          setSettlement({ ...settlement, date: event.target.value })
+                        }
+                        required
+                      />
+                    </Field>
+                  </div>
+                  <button
+                    className="button secondary"
+                    disabled={busy || !loans.some((loan) => loan.remaining_amount > 0)}
+                  >
+                    <ArrowDownToLine size={16} /> Save repayment
+                  </button>
+                </form>
+              </section>
+              <section className="money-summary">
+                <Metric
+                  label="Still to receive"
+                  value={formatMoney(outstandingIn)}
+                  detail="Money given to others"
+                  icon={ArrowDownToLine}
+                  tone="green"
+                />
+                <Metric
+                  label="Still to pay"
+                  value={formatMoney(outstandingOut)}
+                  detail="Money taken from others"
+                  icon={ArrowLeftRight}
+                  tone="rust"
+                />
+              </section>
+              <section className="surface span-all">
+                <SectionHead title="Money ledger" eyebrow={`${loans.length} RECORDS`} />
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Person</th>
+                        <th>Direction</th>
+                        <th>Date</th>
+                        <th className="align-right">Original</th>
+                        <th className="align-right">Repaid</th>
+                        <th className="align-right">Remaining</th>
+                        <th>Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {loans.map((loan) => (
+                        <tr key={loan.id}>
+                          <td>
+                            <b>{loan.person_name}</b>
+                          </td>
+                          <td>{loan.type === 'GIVEN' ? 'To receive' : 'To pay'}</td>
+                          <td>{loan.loan_date}</td>
+                          <td className="align-right numeric">{formatMoney(loan.amount)}</td>
+                          <td className="align-right numeric">{formatMoney(loan.paid_amount)}</td>
+                          <td className="align-right numeric">
+                            {formatMoney(loan.remaining_amount)}
+                          </td>
+                          <td>
+                            <span
+                              className={`pill ${loan.status === 'SETTLED' ? 'pill-green' : 'pill-gold'}`}
+                            >
+                              {loan.status === 'SETTLED' ? 'Settled' : 'Open'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          )}
+          {tab === 'reports' && (
+            <>
+              <div className="report-toolbar surface">
+                <div>
+                  <p className="eyebrow">SHOP PERFORMANCE</p>
+                  <h2>Reports</h2>
+                </div>
+                <div className="report-filters">
+                  <Field label="From">
+                    <input
+                      type="date"
+                      value={reportStart}
+                      onChange={(event) => setReportStart(event.target.value)}
+                    />
+                  </Field>
+                  <Field label="To">
+                    <input
+                      type="date"
+                      value={reportEnd}
+                      onChange={(event) => setReportEnd(event.target.value)}
+                    />
+                  </Field>
+                  <button className="button secondary" onClick={exportReport}>
+                    <ArrowDownToLine size={15} /> Export CSV
+                  </button>
+                </div>
+              </div>
+              {reportStart > reportEnd && (
+                <Notice kind="error">From date must be on or before To date.</Notice>
+              )}
+              <div className="metric-grid report-metrics">
+                <Metric
+                  label="Bills"
+                  value={String(reportSales.filter((sale) => sale.status === 'CONFIRMED').length)}
+                  detail={`${reportStart} to ${reportEnd}`}
+                  icon={FileText}
+                  tone="ink"
+                />
+                <Metric
+                  label="Net sales"
+                  value={formatMoney(reportNet)}
+                  detail="Refunds use their own event date"
+                  icon={ShoppingCart}
+                  tone="green"
+                />
+                <Metric
+                  label="Refund total"
+                  value={formatMoney(
+                    reportReturns.reduce((sum, row) => sum + row.refund_amount, 0)
+                  )}
+                  detail={`${reportReturns.length} return lines`}
+                  icon={Undo2}
+                  tone="rust"
+                />
+                <Metric
+                  label="Trading profit"
+                  value={formatMoney(reportProfit)}
+                  detail="Before shop expenses"
+                  icon={ChartNoAxesCombined}
+                  tone="gold"
+                />
+              </div>
+              <div className="surface report-table">
+                <SectionHead
+                  title="Sales activity"
+                  eyebrow="SAVED INVOICES IN SELECTED PERIOD"
+                  action={
+                    <label className="search-field">
+                      <Search size={15} />
+                      <input
+                        placeholder="Filter bill no."
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
+                      />
+                    </label>
+                  }
+                />
+                <SalesTable
+                  sales={reportSales.filter((sale) =>
+                    sale.invoice_number.toLowerCase().includes(search.toLowerCase())
+                  )}
+                  onPrint={(sale) => setReceipt(saleReceipt(sale))}
+                />
+              </div>
+              <p className="report-caveat">
+                <CircleAlert size={15} /> Trading profit excludes rent, wages, and other operating
+                expenses.
+              </p>
+            </>
+          )}
+          {tab === 'settings' && (
+            <div className="page-grid">
+              <section className="surface form-surface">
+                <SectionHead title="Admin sign-in" eyebrow="SINGLE ACCOUNT" />
+                <p className="section-copy">
+                  Only the signed-in administrator can change these credentials. Email changes require inbox confirmation.
+                </p>
+                <form onSubmit={updateCredentials} className="form-stack">
+                  <Field label="Login email">
+                    <input type="email" value={accountEmail} onChange={(event) => setAccountEmail(event.target.value)} required autoComplete="email" />
+                  </Field>
+                  <Field label="New password">
+                    <input type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={8} autoComplete="new-password" placeholder="Leave blank to keep current password" />
+                  </Field>
+                  <Field label="Confirm new password">
+                    <input type="password" value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} minLength={8} autoComplete="new-password" />
+                  </Field>
+                  <button className="button secondary" disabled={busy}><Settings2 size={15} /> Update admin sign-in</button>
+                </form>
+              </section>
+              <section className="surface form-surface">
+                <SectionHead title="Shop identity" eyebrow="RECEIPT & WORKSPACE" />
+                <form onSubmit={saveSettings} className="form-stack">
+                  <Field label="Business name">
+                    <input
+                      value={businessForm.business_name}
+                      onChange={(event) =>
+                        setBusinessForm({ ...businessForm, business_name: event.target.value })
+                      }
+                      required
+                    />
+                  </Field>
+                  <Field label="Address">
+                    <input
+                      value={businessForm.address}
+                      onChange={(event) =>
+                        setBusinessForm({ ...businessForm, address: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <div className="form-row">
+                    <Field label="Phone 1">
+                      <input
+                        value={businessForm.phone1}
+                        onChange={(event) =>
+                          setBusinessForm({ ...businessForm, phone1: event.target.value })
+                        }
+                      />
+                    </Field>
+                    <Field label="Phone 2">
+                      <input
+                        value={businessForm.phone2}
+                        onChange={(event) =>
+                          setBusinessForm({ ...businessForm, phone2: event.target.value })
+                        }
+                      />
+                    </Field>
+                  </div>
+                  <Field label="Receipt footer">
+                    <input
+                      value={businessForm.receipt_footer}
+                      onChange={(event) =>
+                        setBusinessForm({ ...businessForm, receipt_footer: event.target.value })
+                      }
+                    />
+                  </Field>
+                  <button className="button primary" disabled={busy}>
+                    <Settings2 size={16} /> Save details
+                  </button>
+                </form>
+              </section>
+              <section className="surface help-surface">
+                <p className="eyebrow">DATA & ACCESS</p>
+                <h3>One account. Private records.</h3>
+                <p>
+                  Each signed-in account sees only its own rows through Supabase Row Level Security.
+                  Sales, inventory and repayment changes are committed atomically.
+                </p>
+                <div className="security-list">
+                  <span>
+                    <i /> Row-level security enabled
+                  </span>
+                  <span>
+                    <i /> No image or document uploads
+                  </span>
+                  <span>
+                    <i /> Text records and transaction data only
+                  </span>
+                </div>
+                <button className="button secondary" type="button" onClick={showPrinterTest}>
+                  <Printer size={15} /> Preview 80 mm test receipt
+                </button>
+                <button
+                  className="button secondary"
+                  onClick={() => {
+                    const content = JSON.stringify(
+                      {
+                        exportedAt: new Date().toISOString(),
+                        products,
+                        sales,
+                        returns,
+                        loans,
+                        settings
+                      },
+                      null,
+                      2
+                    );
+                    const link = document.createElement('a');
+                    link.href = URL.createObjectURL(
+                      new Blob([content], { type: 'application/json' })
+                    );
+                    link.download = `aziz-shop-records-${today()}.json`;
+                    link.click();
+                    URL.revokeObjectURL(link.href);
+                  }}
+                >
+                  <ArrowDownToLine size={15} /> Export records
+                </button>
+                <div className="reset-zone">
+                  <p className="eyebrow">DESTRUCTIVE ACTION</p>
+                  <h3>Reset all shop data</h3>
+                  <p>Downloads a full JSON safety export, then deletes products, stock history, sales, returns, money records, business settings, and audit history. The admin login remains.</p>
+                  <form onSubmit={resetShopData} className="form-stack">
+                    <Field label={'Type "RESET AZIZ SHOP" to confirm'}>
+                      <input value={resetPhrase} onChange={(event) => setResetPhrase(event.target.value)} autoComplete="off" spellCheck={false} required />
+                    </Field>
+                    <button className="button reset-button" disabled={busy || resetPhrase !== 'RESET AZIZ SHOP'}>
+                      <X size={15} /> Reset entire shop
+                    </button>
+                  </form>
+                </div>
+              </section>
+            </div>
+          )}
+        </div>
+        {receipt && (
+          <ReceiptPreview
+            receipt={receipt}
+            settings={settings}
+            onClose={() => setReceipt(null)}
+          />
+        )}
+        <footer className="workspace-footer">
+          <span>AZIZ & SON · SHOP LEDGER</span>
+          <span>Amounts in Pakistani rupees · Data syncs to your Supabase project</span>
+          <button onClick={() => void loadData()} className="refresh-button">
+            <Activity size={13} /> Refresh data
+          </button>
+        </footer>
+      </section>
+    </main>
+  );
+}
+
+function SetupNotice() {
+  return (
+    <main className="setup-screen">
+      <div className="setup-mark">
+        A<span>&</span>S
+      </div>
+      <p className="eyebrow">AZIZ & SON / WEB LEDGER</p>
+      <h1>Connect your shop database.</h1>
+      <p>
+        Add the Supabase project URL and publishable key to{' '}
+        <code>Aziz-Factory-Website/.env.local</code>, then run the SQL migration in your Supabase
+        SQL editor.
+      </p>
+      <pre>
+        NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+        <br />
+        NEXT_PUBLIC_SUPABASE_ANON_KEY=your-publishable-key
+      </pre>
+      <span>No service-role secret belongs in browser or Vercel public environment variables.</span>
+    </main>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <label className="field">
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Notice({ children, kind }: { children: React.ReactNode; kind?: 'error' }) {
+  return (
+    <div
+      className={`notice ${kind === 'error' ? 'notice-error' : ''}`}
+      role={kind === 'error' ? 'alert' : 'status'}
+    >
+      {kind === 'error' ? <CircleAlert size={16} /> : <span className="notice-tick">✓</span>}
+      {children}
+    </div>
+  );
+}
+
+function Metric({
+  label,
+  value,
+  detail,
+  icon: Icon,
+  tone
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon: typeof Coins;
+  tone: string;
+}) {
+  return (
+    <section className="metric-card">
+      <div className={`metric-icon ${tone}`}>
+        <Icon size={17} strokeWidth={1.8} />
+      </div>
+      <p>{label}</p>
+      <strong>{value}</strong>
+      <small>{detail}</small>
+    </section>
+  );
+}
+
+function SectionHead({
+  title,
+  eyebrow,
+  action
+}: {
+  title: string;
+  eyebrow: string;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="section-head">
+      <div>
+        <p className="eyebrow">{eyebrow}</p>
+        <h2>{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function EmptyState({ text }: { text: string }) {
+  return (
+    <div className="empty-state">
+      <ClipboardList size={21} />
+      <p>{text}</p>
+    </div>
+  );
+}
+
+function SalesTable({ sales, onPrint }: { sales: Sale[]; onPrint?: (sale: Sale) => void }) {
+  return sales.length ? (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Invoice</th>
+            <th>Date</th>
+            <th>Items</th>
+            <th>Status</th>
+            <th className="align-right">Original total</th>
+            <th className="print-column">Receipt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sales.map((sale) => (
+            <tr key={sale.id}>
+              <td>
+                <b className="invoice-number">{sale.invoice_number}</b>
+              </td>
+              <td>{sale.sale_date}</td>
+              <td>
+                {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
+                <small>
+                  {sale.items
+                    .slice(0, 2)
+                    .map((item) => item.product_name_snapshot)
+                    .join(', ')}
+                </small>
+              </td>
+              <td>
+                <span
+                  className={`pill ${sale.status === 'CONFIRMED' ? 'pill-green' : 'pill-rust'}`}
+                >
+                  {sale.status === 'CONFIRMED' ? 'Confirmed' : 'Cancelled'}
+                </span>
+              </td>
+              <td className="align-right numeric">{formatMoney(sale.net_total)}</td>
+              <td className="print-column">
+                {onPrint && (
+                  <button className="icon-button" type="button" title={`Print ${sale.invoice_number}`} aria-label={`Print ${sale.invoice_number}`} onClick={() => onPrint(sale)}>
+                    <Printer size={15} />
+                  </button>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <EmptyState text="Sales bills will appear here after the first sale." />
+  );
+}
+
+function ProductsTable({
+  products,
+  onEdit,
+  onToggleActive
+}: {
+  products: Product[];
+  onEdit?: (product: Product) => void;
+  onToggleActive?: (product: Product) => void;
+}) {
+  return products.length ? (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Product</th>
+            <th>Unit</th>
+            <th className="align-right">In stock</th>
+            <th className="align-right">Buying rate</th>
+            <th className="align-right">Selling rate</th>
+            <th>Stock status</th>
+            {(onEdit || onToggleActive) && <th>Actions</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {products.map((product) => {
+            const state =
+              product.stock <= 0 ? 'OUT' : product.stock <= product.minimum_stock ? 'LOW' : 'OK';
+            return (
+              <tr key={product.id}>
+                <td>
+                  <b>{product.name}</b>
+                  {!product.active && <small>Inactive</small>}
+                </td>
+                <td>{product.unit}</td>
+                <td className="align-right numeric">{formatQuantity(product.stock)}</td>
+                <td className="align-right numeric">{formatMoney(product.purchase_cost)}</td>
+                <td className="align-right numeric">{formatMoney(product.sale_price)}</td>
+                <td>
+                  <span
+                    className={`pill ${state === 'OK' ? 'pill-green' : state === 'LOW' ? 'pill-gold' : 'pill-rust'}`}
+                  >
+                    {state === 'OK' ? 'In range' : state === 'LOW' ? 'Low stock' : 'Out of stock'}
+                  </span>
+                </td>
+                {(onEdit || onToggleActive) && (
+                  <td className="product-actions">
+                    {onEdit && <button className="icon-button" type="button" title={`Edit ${product.name}`} aria-label={`Edit ${product.name}`} onClick={() => onEdit(product)}><Pencil size={15} /></button>}
+                    {onToggleActive && <button className="icon-button" type="button" title={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`} aria-label={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`} onClick={() => onToggleActive(product)}><Power size={15} /></button>}
+                  </td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  ) : (
+    <EmptyState text="Add a product to start tracking your catalog." />
+  );
+}
+
+function ReceiptPreview({
+  receipt,
+  settings,
+  onClose
+}: {
+  receipt: ReceiptRecord;
+  settings: { business_name: string; address: string; phone1: string; phone2: string; receipt_footer: string };
+  onClose: () => void;
+}) {
+  const [mounted, setMounted] = useState(false);
+  const [deliveryError, setDeliveryError] = useState('');
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setMounted(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [onClose]);
+
+  function deliverReceiptPdf(openForPrint: boolean) {
+    setDeliveryError('');
+    const pdf = createReceiptPdf(receipt, settings);
+    const url = URL.createObjectURL(pdf);
+    if (openForPrint) {
+      const printWindow = window.open(url, '_blank');
+      if (!printWindow) {
+        URL.revokeObjectURL(url);
+        setDeliveryError('The PDF tab was blocked. Allow pop-ups for this site or choose Save PDF.');
+        return;
+      }
+      printWindow.opener = null;
+    } else {
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${receipt.number}.pdf`;
+      link.click();
+    }
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+
+  if (!mounted) return null;
+
+  return createPortal((
+    <div className="receipt-overlay" role="dialog" aria-modal="true" aria-label="Receipt preview">
+      <div className="receipt-controls">
+        <div>
+          <p className="eyebrow">80 MM THERMAL RECEIPT PDF</p>
+          <strong>{receipt.number}</strong>
+          <small className="receipt-print-instructions">Save this vector PDF, then print from your PDF viewer at 100% on continuous 80 mm paper.</small>
+        </div>
+        <div className="receipt-control-actions">
+          <button className="button secondary" type="button" onClick={onClose}>Close</button>
+          <button className="button secondary" type="button" onClick={() => deliverReceiptPdf(false)}><ArrowDownToLine size={15} /> Save PDF</button>
+          <button className="button primary" type="button" onClick={() => deliverReceiptPdf(true)}><Printer size={15} /> Open PDF to print</button>
+        </div>
+      </div>
+      {deliveryError && <p className="receipt-delivery-error" role="alert">{deliveryError}</p>}
+      <div className="receipt-page">
+        <article className="receipt-paper" id="receipt-paper">
+          <header className="receipt-heading">
+            <strong>{settings.business_name}</strong>
+            <b>{receipt.kind === 'RETURN' ? 'RETURN BILL' : 'SALE BILL'}</b>
+          </header>
+          {receipt.kind === 'RETURN' && <div className="receipt-rule" />}
+          <div className="receipt-meta"><b>Bill:</b><span>{receipt.number}</span></div>
+          <div className="receipt-meta"><b>Date:</b><span>{receipt.date}</span></div>
+          {receipt.reference && <div className="receipt-meta"><b>Original:</b><span>{receipt.reference}</span></div>}
+          <div className="receipt-rule" />
+          <div className="receipt-grid receipt-grid-head"><b>Item</b><b>Qty</b><b>Rate</b><b>Amount</b></div>
+          {receipt.items.map((item, index) => (
+            <div className="receipt-item" key={`${item.name}-${index}`}>
+              <div className="receipt-grid">
+                <strong>{item.name}</strong>
+                <span>{formatQuantity(item.quantity)} {item.unit}</span>
+                <span>{formatQuantity(item.rate)}</span>
+                <b>{formatQuantity(item.amount)}</b>
+              </div>
+              {item.note && <small>{item.note}</small>}
+            </div>
+          ))}
+          <div className="receipt-total"><b>{receipt.totalLabel}</b><strong>{formatMoney(receipt.total)}</strong></div>
+          {receipt.kind === 'RETURN' && receipt.notes && <p className="receipt-notes">{receipt.notes}</p>}
+          <footer className="receipt-footer">{settings.receipt_footer || 'Thank you for your business!'}</footer>
+        </article>
+      </div>
+    </div>
+  ), document.body);
+}
