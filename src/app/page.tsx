@@ -1337,28 +1337,6 @@ export default function Home() {
           )}
           {tab === 'overview' && (
             <>
-              <section className="welcome-band">
-                <div>
-                  <p className="eyebrow">DAILY BOOK / {today()}</p>
-                  <h2>
-                    Good business starts with
-                    <br />
-                    <em>clear numbers.</em>
-                  </h2>
-                  <p>Today’s shop activity, returned goods and stock position.</p>
-                </div>
-                <div className="welcome-graphic" aria-hidden="true">
-                  <div className="receipt-slip">
-                    <span>AZIZ & SON</span>
-                    <b>Rs. {formatQuantity(Math.abs(todayNetSales))}</b>
-                    <i>TODAY&apos;S NET</i>
-                    <div />
-                  </div>
-                  <div className="graphic-seal">
-                    A<span>&</span>S
-                  </div>
-                </div>
-              </section>
               <div className="metric-grid">
                 <Metric
                   label="Net sales today"
@@ -1446,7 +1424,7 @@ export default function Home() {
                 </section>
               </div>
               <div className="bottom-grid">
-                <section className="surface">
+                <section className="surface span-all">
                   <SectionHead
                     title="Latest returns"
                     eyebrow="RETURNS BOOK"
@@ -1456,7 +1434,7 @@ export default function Home() {
                       </button>
                     }
                   />
-                  {returns.slice(0, 4).map((row) => (
+                  {returns.slice(0, 6).map((row) => (
                     <div className="ledger-row" key={row.id}>
                       <div className="ledger-icon rust">
                         <Undo2 size={15} />
@@ -1471,23 +1449,6 @@ export default function Home() {
                     </div>
                   ))}
                   {!returns.length && <EmptyState text="No customer returns have been recorded." />}
-                </section>
-                <section className="surface note-panel">
-                  <div className="note-glyph">
-                    <FileText size={19} />
-                  </div>
-                  <div>
-                    <p className="eyebrow">SHOP NOTE</p>
-                    <h3>Money ledger</h3>
-                    <p>
-                      Outstanding to receive <b>{formatMoney(outstandingIn)}</b>
-                      <br />
-                      Outstanding to pay <b>{formatMoney(outstandingOut)}</b>
-                    </p>
-                    <button className="text-button" onClick={() => setTab('money')}>
-                      Review balances <ArrowLeftRight size={14} />
-                    </button>
-                  </div>
                 </section>
               </div>
             </>
@@ -1784,7 +1745,7 @@ export default function Home() {
           )}
           {tab === 'products' && (
             <div className="page-grid">
-              <section id="product-form" className="surface form-surface">
+              <section id="product-form" className="surface form-surface span-all">
                 <SectionHead title={editingProduct ? 'Edit product' : 'Add a product'} eyebrow="PRODUCT CATALOG" />
                 <form className="form-stack" onSubmit={createProduct}>
                   <Field label="Product name">
@@ -1874,28 +1835,32 @@ export default function Home() {
                       />
                     </Field>
                   )}
-                  <button className="button primary" disabled={busy}>
-                    {editingProduct ? <Pencil size={16} /> : <Plus size={16} />}
-                    {editingProduct ? 'Save changes' : 'Save product'}
-                  </button>
-                  {editingProduct && <button className="button secondary" type="button" onClick={() => { setEditingProduct(null); setNewProduct({ name: '', unit: 'Box', purchase_cost: '', sale_price: '', minimum_stock: '10', opening_stock: '' }); }}>Cancel edit</button>}
+                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                    <button className="button primary" disabled={busy}>
+                      {editingProduct ? <Pencil size={16} /> : <Plus size={16} />}
+                      {editingProduct ? 'Save changes' : 'Save product'}
+                    </button>
+                    {editingProduct && (
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setNewProduct({
+                            name: '',
+                            unit: 'Box',
+                            purchase_cost: '',
+                            sale_price: '',
+                            minimum_stock: '10',
+                            opening_stock: ''
+                          });
+                        }}
+                      >
+                        Cancel edit
+                      </button>
+                    )}
+                  </div>
                 </form>
-              </section>
-              <section className="surface help-surface">
-                <p className="eyebrow">FAST INVENTORY</p>
-                <h3>Manage products & add stock</h3>
-                <p>
-                  Click the <b>+ Stock</b> button next to any product in the list below to instantly restock units, record purchase rates, or set opening stock.
-                </p>
-                <div className="inline-stat" style={{ marginTop: '16px' }}>
-                  <span>Total stock valuation</span>
-                  <b>{formatMoney(stockValue)}</b>
-                </div>
-                <div className="rule-list" style={{ marginTop: '16px' }}>
-                  <span>Box stays box, Kg stays kg</span>
-                  <span>Direct stock additions with 1 click</span>
-                  <span>Instant real-time stock sync</span>
-                </div>
               </section>
               <section className="surface span-all">
                 <div className="section-head">
@@ -1924,7 +1889,7 @@ export default function Home() {
           )}
           {tab === 'returns' && (
             <div className="page-grid">
-              <section className="surface form-surface">
+              <section className="surface form-surface span-all">
                 <SectionHead title="Record a return" eyebrow="CUSTOMER REFUND" />
                 <form onSubmit={createReturn} className="form-stack">
                   <Field label="Original sales bill (optional)">
@@ -2074,19 +2039,6 @@ export default function Home() {
                     <Undo2 size={16} /> Save return
                   </button>
                 </form>
-              </section>
-              <section className="surface help-surface">
-                <p className="eyebrow">RETURN POLICY</p>
-                <h3>Refunds follow the original bill.</h3>
-                <p>
-                  Linked returns use original prices, cap quantities to the unreturned balance, and
-                  assign any rounding remainder to the final return.
-                </p>
-                <div className="rule-list">
-                  <span>Saleable goods increase stock</span>
-                  <span>Damaged goods do not increase stock</span>
-                  <span>Refund is counted on the return date</span>
-                </div>
               </section>
               <section className="surface span-all">
                 <SectionHead title="Return book" eyebrow={`${returns.length} RETURN LINES`} />
@@ -2469,27 +2421,12 @@ export default function Home() {
                   </button>
                 </form>
               </section>
-              <section className="surface help-surface">
-                <p className="eyebrow">DATA & ACCESS</p>
-                <h3>One account. Private records.</h3>
-                <p>
-                  Each signed-in account sees only its own rows through Supabase Row Level Security.
-                  Sales, inventory and repayment changes are committed atomically.
-                </p>
-                <div className="security-list">
-                  <span>
-                    <i /> Row-level security enabled
-                  </span>
-                  <span>
-                    <i /> No image or document uploads
-                  </span>
-                  <span>
-                    <i /> Text records and transaction data only
-                  </span>
-                </div>
-                <button className="button secondary" type="button" onClick={showPrinterTest}>
-                  <Printer size={15} /> Preview 80 mm test receipt
-                </button>
+              <section className="surface form-surface span-all">
+                <SectionHead title="Database backups & POS tools" eyebrow="DATA & SYSTEM" />
+                <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', margin: '14px 0' }}>
+                  <button className="button secondary" type="button" onClick={showPrinterTest}>
+                    <Printer size={15} /> Preview 80 mm test receipt
+                  </button>
                 <button
                   className="button secondary"
                   onClick={() => {
@@ -2580,6 +2517,7 @@ export default function Home() {
                 >
                   <RefreshCw size={15} /> Purge Local Offline Cache & Resync
                 </button>
+                </div>
                 <div className="reset-zone">
                   <p className="eyebrow">DESTRUCTIVE ACTION</p>
                   <h3>Reset all shop data</h3>
