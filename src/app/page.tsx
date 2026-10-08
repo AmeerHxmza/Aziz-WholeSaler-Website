@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useEffectEvent, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -2012,43 +2012,61 @@ export default function Home() {
                     <h2>Product Catalog & Stock Matrix</h2>
                   </div>
                   <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
-                    <label className="search-field" style={{ minWidth: '220px' }}>
-                      <Search size={15} />
+                    <div className="table-search-box" style={{ minWidth: '220px' }}>
+                      <Search size={14} />
                       <input
-                        placeholder="Search product or unit..."
+                        placeholder="Search product name or unit..."
                         value={search}
                         onChange={(event) => setSearch(event.target.value)}
                       />
                       {search && (
                         <button
                           type="button"
-                          className="icon-button"
-                          style={{
-                            width: '24px',
-                            height: '24px',
-                            border: 'none',
-                            background: 'transparent',
-                            cursor: 'pointer'
-                          }}
+                          className="table-search-clear"
                           onClick={() => setSearch('')}
                           title="Clear search"
                         >
                           <X size={13} />
                         </button>
                       )}
-                    </label>
-                    <select
-                      className="compact-select"
-                      aria-label="Filter products"
-                      value={productFilter}
-                      onChange={(event) => setProductFilter(event.target.value as typeof productFilter)}
-                    >
-                      <option value="ALL">All products ({products.length})</option>
-                      <option value="ACTIVE">Active ({products.filter((p) => p.active).length})</option>
-                      <option value="LOW_STOCK">Low stock ({lowStock.length})</option>
-                      <option value="OUT_OF_STOCK">Out of stock ({products.filter((p) => p.stock <= 0).length})</option>
-                      <option value="INACTIVE">Inactive ({products.filter((p) => !p.active).length})</option>
-                    </select>
+                    </div>
+                    <div className="filter-pill-group">
+                      <button
+                        type="button"
+                        className={`filter-pill ${productFilter === 'ALL' ? 'active' : ''}`}
+                        onClick={() => setProductFilter('ALL')}
+                      >
+                        All <span className="pill-count">{products.length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`filter-pill ${productFilter === 'ACTIVE' ? 'active' : ''}`}
+                        onClick={() => setProductFilter('ACTIVE')}
+                      >
+                        Active <span className="pill-count">{products.filter((p) => p.active).length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`filter-pill ${productFilter === 'LOW_STOCK' ? 'active' : ''}`}
+                        onClick={() => setProductFilter('LOW_STOCK')}
+                      >
+                        Low Stock <span className="pill-count">{lowStock.length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`filter-pill ${productFilter === 'OUT_OF_STOCK' ? 'active' : ''}`}
+                        onClick={() => setProductFilter('OUT_OF_STOCK')}
+                      >
+                        Out of Stock <span className="pill-count">{products.filter((p) => p.stock <= 0).length}</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`filter-pill ${productFilter === 'INACTIVE' ? 'active' : ''}`}
+                        onClick={() => setProductFilter('INACTIVE')}
+                      >
+                        Inactive <span className="pill-count">{products.filter((p) => !p.active).length}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -2489,55 +2507,11 @@ export default function Home() {
               </section>
               <section className="surface span-all">
                 <SectionHead title="Return book" eyebrow={`${returns.length} RETURN LINES`} />
-                {returns.length ? (
-                  <div className="table-wrap">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Return bill</th>
-                          <th>Original invoice</th>
-                          <th>Product</th>
-                          <th>Date</th>
-                          <th>Condition</th>
-                          <th className="align-right">Refund</th>
-                          <th>Receipt</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {returns.map((row) => (
-                          <tr key={row.id}>
-                            <td>
-                              <b>{row.bill_number}</b>
-                            </td>
-                            <td>{row.invoice_number || 'Unlinked'}</td>
-                            <td>
-                              {row.product_name_snapshot}
-                              <small>
-                                {formatQuantity(row.quantity)} {row.unit_snapshot}
-                              </small>
-                            </td>
-                            <td>{row.movement_date}</td>
-                            <td>
-                              <span className={`pill ${row.restock ? 'pill-green' : 'pill-rust'}`}>
-                                {row.restock ? 'Restocked' : 'Damaged'}
-                              </span>
-                            </td>
-                            <td className="align-right numeric">
-                              {formatMoney(row.refund_amount)}
-                            </td>
-                            <td>
-                              <button className="icon-button" type="button" title={`Print ${row.bill_number}`} aria-label={`Print ${row.bill_number}`} onClick={() => setReceipt(savedReturnReceipt(row, returns, sales))}>
-                                <Printer size={15} />
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <EmptyState text="Saved customer returns will appear here." />
-                )}
+                <ReturnsTable
+                  returns={returns}
+                  sales={sales}
+                  onPrint={(row) => setReceipt(savedReturnReceipt(row, returns, sales))}
+                />
               </section>
             </div>
           )}
@@ -3218,130 +3192,455 @@ function SalesTable({
   returns?: ReturnRow[];
   onPrint?: (sale: Sale) => void;
 }) {
-  return sales.length ? (
-    <div className="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Invoice</th>
-            <th>Date</th>
-            <th>Customer</th>
-            <th>Items</th>
-            <th>Status</th>
-            <th className="align-right">Bill amount</th>
-            <th className="print-column">Receipt</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sales.map((sale) => {
-            const saleReturns = returns.filter((r) => r.sale_id === sale.id);
-            const refundedAmount = roundMoney(
-              saleReturns.reduce((sum, r) => sum + Number(r.refund_amount || 0), 0)
-            );
-            const billTotal = roundMoney(Number(sale.total ?? sale.net_total));
-            const remainingNet = roundMoney(Math.max(0, billTotal - refundedAmount));
-            const isFullyReturned = refundedAmount >= billTotal && billTotal > 0;
-            const isPartialReturn = refundedAmount > 0 && !isFullyReturned;
-            const statusLabel =
-              sale.status === 'VOIDED'
-                ? 'Cancelled'
-                : isFullyReturned
-                  ? 'Fully returned'
-                  : isPartialReturn
-                    ? 'Partial return'
-                    : 'Confirmed';
-            const statusClass =
-              sale.status === 'VOIDED'
-                ? 'pill-rust'
-                : isFullyReturned
-                  ? 'pill-rust'
-                  : isPartialReturn
-                    ? 'pill-gold'
-                    : 'pill-green';
+  const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<
+    'ALL' | 'CONFIRMED' | 'PARTIAL' | 'FULLY' | 'CANCELLED'
+  >('ALL');
 
-            const grossProfit = roundMoney(
-              sale.items && sale.items.length > 0
-                ? sale.items.reduce(
-                    (sum, item) =>
-                      sum +
-                      (Number(item.line_total) -
-                        Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
-                    0
-                  )
-                : Number((sale as any).original_profit || 0)
-            );
-            const reversedProfit = roundMoney(
-              saleReturns.reduce(
-                (sum, r) =>
-                  sum +
-                  (typeof r.profit_reversed === 'number' && r.profit_reversed > 0
-                    ? r.profit_reversed
-                    : r.restock && r.cost_amount_snapshot > 0 && r.refund_amount >= r.cost_amount_snapshot
-                      ? r.refund_amount - r.cost_amount_snapshot
-                      : 0),
-                0
-              )
-            );
-            const saleProfit = roundMoney(grossProfit - reversedProfit);
+  const salesWithStatus = useMemo(() => {
+    return sales.map((sale) => {
+      const saleReturns = returns.filter((r) => r.sale_id === sale.id);
+      const refundedAmount = roundMoney(
+        saleReturns.reduce((sum, r) => sum + Number(r.refund_amount || 0), 0)
+      );
+      const billTotal = roundMoney(Number(sale.total ?? sale.net_total));
+      const remainingNet = roundMoney(Math.max(0, billTotal - refundedAmount));
+      const isFullyReturned = refundedAmount >= billTotal && billTotal > 0;
+      const isPartialReturn = refundedAmount > 0 && !isFullyReturned;
+      const statusLabel =
+        sale.status === 'VOIDED'
+          ? 'Cancelled'
+          : isFullyReturned
+            ? 'Fully returned'
+            : isPartialReturn
+              ? 'Partial return'
+              : 'Confirmed';
+      const statusClass =
+        sale.status === 'VOIDED'
+          ? 'pill-rust'
+          : isFullyReturned
+            ? 'pill-rust'
+            : isPartialReturn
+              ? 'pill-gold'
+              : 'pill-green';
 
-            return (
-              <tr key={sale.id}>
-                <td>
-                  <b className="invoice-number">{sale.invoice_number}</b>
-                </td>
-                <td>{sale.sale_date}</td>
-                <td>
-                  <b>{sale.customer_name || 'Walk-in'}</b>
-                  {sale.customer_phone && (
-                    <small style={{ display: 'block', color: '#666', fontSize: '11px' }}>
-                      {sale.customer_phone}
-                    </small>
-                  )}
-                </td>
-                <td>
-                  {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
-                  <small>
-                    {sale.items
-                      .slice(0, 2)
-                      .map((item) => item.product_name_snapshot)
-                      .join(', ')}
-                  </small>
-                </td>
-                <td>
-                  <span className={`pill ${statusClass}`}>{statusLabel}</span>
-                </td>
-                <td className="align-right numeric">
-                  <b>{formatMoney(billTotal)}</b>
-                  {refundedAmount > 0 && (
-                    <small style={{ color: 'var(--rust)', display: 'block', fontSize: '10px' }}>
-                      −{formatMoney(refundedAmount)} returned {isPartialReturn ? `(Net: ${formatMoney(remainingNet)})` : ''}
-                    </small>
-                  )}
-                  <small style={{ color: saleProfit >= 0 ? '#10b981' : '#ef4444', display: 'block', fontSize: '10px', marginTop: '2px' }}>
-                    Profit: {saleProfit >= 0 ? '+' : ''}{formatMoney(saleProfit)}
-                  </small>
-                </td>
-                <td className="print-column">
-                  {onPrint && (
-                    <button
-                      className="icon-button"
-                      type="button"
-                      title={`Print ${sale.invoice_number}`}
-                      aria-label={`Print ${sale.invoice_number}`}
-                      onClick={() => onPrint(sale)}
-                    >
-                      <Printer size={15} />
-                    </button>
-                  )}
-                </td>
+      const grossProfit = roundMoney(
+        sale.items && sale.items.length > 0
+          ? sale.items.reduce(
+              (sum, item) =>
+                sum +
+                (Number(item.line_total) -
+                  Number(
+                    item.cost_total_snapshot ||
+                      item.purchase_cost_snapshot * item.quantity ||
+                      0
+                  )),
+              0
+            )
+          : Number((sale as any).original_profit || 0)
+      );
+      const reversedProfit = roundMoney(
+        saleReturns.reduce(
+          (sum, r) =>
+            sum +
+            (typeof r.profit_reversed === 'number' && r.profit_reversed > 0
+              ? r.profit_reversed
+              : r.restock && r.cost_amount_snapshot > 0 && r.refund_amount >= r.cost_amount_snapshot
+                ? r.refund_amount - r.cost_amount_snapshot
+                : 0),
+          0
+        )
+      );
+      const saleProfit = roundMoney(grossProfit - reversedProfit);
+      const itemsSummary = sale.items.map((i) => i.product_name_snapshot).join(' ');
+
+      return {
+        sale,
+        refundedAmount,
+        billTotal,
+        remainingNet,
+        isPartialReturn,
+        statusLabel,
+        statusClass,
+        saleProfit,
+        itemsSummary
+      };
+    });
+  }, [sales, returns]);
+
+  const counts = useMemo(
+    () => ({
+      all: salesWithStatus.length,
+      confirmed: salesWithStatus.filter((s) => s.statusLabel === 'Confirmed').length,
+      partial: salesWithStatus.filter((s) => s.statusLabel === 'Partial return').length,
+      fully: salesWithStatus.filter((s) => s.statusLabel === 'Fully returned').length,
+      cancelled: salesWithStatus.filter((s) => s.statusLabel === 'Cancelled').length
+    }),
+    [salesWithStatus]
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return salesWithStatus.filter((row) => {
+      if (statusFilter === 'CONFIRMED' && row.statusLabel !== 'Confirmed') return false;
+      if (statusFilter === 'PARTIAL' && row.statusLabel !== 'Partial return') return false;
+      if (statusFilter === 'FULLY' && row.statusLabel !== 'Fully returned') return false;
+      if (statusFilter === 'CANCELLED' && row.statusLabel !== 'Cancelled') return false;
+
+      if (!q) return true;
+      const s = row.sale;
+      const haystack = `${s.invoice_number} ${s.customer_name || ''} ${s.customer_phone || ''} ${s.sale_date} ${row.itemsSummary}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [salesWithStatus, query, statusFilter]);
+
+  if (!sales.length) {
+    return <EmptyState text="Sales bills will appear here after the first sale." />;
+  }
+
+  return (
+    <div>
+      <div className="table-toolbar">
+        <div className="table-toolbar-left">
+          <div className="table-search-box">
+            <Search size={14} />
+            <input
+              placeholder="Search invoice #, customer name, mobile, item name, date..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="table-search-clear"
+                onClick={() => setQuery('')}
+                title="Clear search"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <div className="filter-pill-group">
+            <button
+              type="button"
+              className={`filter-pill ${statusFilter === 'ALL' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('ALL')}
+            >
+              All Bills <span className="pill-count">{counts.all}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${statusFilter === 'CONFIRMED' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('CONFIRMED')}
+            >
+              Confirmed <span className="pill-count">{counts.confirmed}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${statusFilter === 'PARTIAL' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('PARTIAL')}
+            >
+              Partial Return <span className="pill-count">{counts.partial}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${statusFilter === 'FULLY' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('FULLY')}
+            >
+              Fully Returned <span className="pill-count">{counts.fully}</span>
+            </button>
+            {counts.cancelled > 0 && (
+              <button
+                type="button"
+                className={`filter-pill ${statusFilter === 'CANCELLED' ? 'active' : ''}`}
+                onClick={() => setStatusFilter('CANCELLED')}
+              >
+                Cancelled <span className="pill-count">{counts.cancelled}</span>
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="table-toolbar-right">
+          <span className="table-counter-text">
+            Showing {filtered.length} of {sales.length} {sales.length === 1 ? 'bill' : 'bills'}
+          </span>
+        </div>
+      </div>
+
+      {filtered.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Invoice</th>
+                <th>Date</th>
+                <th>Customer</th>
+                <th>Items</th>
+                <th>Status</th>
+                <th className="align-right">Bill amount</th>
+                <th className="print-column">Receipt</th>
               </tr>
-            );
-          })}
-        </tbody>
-      </table>
+            </thead>
+            <tbody>
+              {filtered.map(
+                ({
+                  sale,
+                  refundedAmount,
+                  billTotal,
+                  remainingNet,
+                  isPartialReturn,
+                  statusLabel,
+                  statusClass,
+                  saleProfit
+                }) => (
+                  <tr key={sale.id}>
+                    <td>
+                      <b className="invoice-number">{sale.invoice_number}</b>
+                    </td>
+                    <td>{sale.sale_date}</td>
+                    <td>
+                      <b>{sale.customer_name || 'Walk-in'}</b>
+                      {sale.customer_phone && (
+                        <small style={{ display: 'block', color: '#666', fontSize: '11px' }}>
+                          {sale.customer_phone}
+                        </small>
+                      )}
+                    </td>
+                    <td>
+                      {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
+                      <small>
+                        {sale.items
+                          .slice(0, 2)
+                          .map((item) => item.product_name_snapshot)
+                          .join(', ')}
+                      </small>
+                    </td>
+                    <td>
+                      <span className={`pill ${statusClass}`}>{statusLabel}</span>
+                    </td>
+                    <td className="align-right numeric">
+                      <b>{formatMoney(billTotal)}</b>
+                      {refundedAmount > 0 && (
+                        <small style={{ color: 'var(--rust)', display: 'block', fontSize: '10px' }}>
+                          −{formatMoney(refundedAmount)} returned{' '}
+                          {isPartialReturn ? `(Net: ${formatMoney(remainingNet)})` : ''}
+                        </small>
+                      )}
+                      <small
+                        style={{
+                          color: saleProfit >= 0 ? '#10b981' : '#ef4444',
+                          display: 'block',
+                          fontSize: '10px',
+                          marginTop: '2px'
+                        }}
+                      >
+                        Profit: {saleProfit >= 0 ? '+' : ''}
+                        {formatMoney(saleProfit)}
+                      </small>
+                    </td>
+                    <td className="print-column">
+                      {onPrint && (
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title={`Print ${sale.invoice_number}`}
+                          aria-label={`Print ${sale.invoice_number}`}
+                          onClick={() => onPrint(sale)}
+                        >
+                          <Printer size={15} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )
+              )}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-filter-state">
+          <Search size={22} />
+          <p>
+            No sales bills found matching <b>"{query}"</b>
+            {statusFilter !== 'ALL' ? ` with status "${statusFilter.toLowerCase()}"` : ''}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setQuery('');
+              setStatusFilter('ALL');
+            }}
+          >
+            Reset Filters
+          </button>
+        </div>
+      )}
     </div>
-  ) : (
-    <EmptyState text="Sales bills will appear here after the first sale." />
+  );
+}
+
+function ReturnsTable({
+  returns,
+  sales = [],
+  onPrint
+}: {
+  returns: ReturnRow[];
+  sales?: Sale[];
+  onPrint?: (row: ReturnRow) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [conditionFilter, setConditionFilter] = useState<'ALL' | 'RESTOCKED' | 'DAMAGED'>('ALL');
+
+  const counts = useMemo(
+    () => ({
+      all: returns.length,
+      restocked: returns.filter((r) => r.restock).length,
+      damaged: returns.filter((r) => !r.restock).length
+    }),
+    [returns]
+  );
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return returns.filter((row) => {
+      if (conditionFilter === 'RESTOCKED' && !row.restock) return false;
+      if (conditionFilter === 'DAMAGED' && row.restock) return false;
+      if (!q) return true;
+      const haystack = `${row.bill_number} ${row.invoice_number || ''} ${row.product_name_snapshot} ${row.movement_date} ${row.reason}`.toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [returns, query, conditionFilter]);
+
+  if (!returns.length) {
+    return <EmptyState text="Saved customer returns will appear here." />;
+  }
+
+  return (
+    <div>
+      <div className="table-toolbar">
+        <div className="table-toolbar-left">
+          <div className="table-search-box">
+            <Search size={14} />
+            <input
+              placeholder="Search return #, original invoice, product, date, reason..."
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="table-search-clear"
+                onClick={() => setQuery('')}
+                title="Clear search"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+          <div className="filter-pill-group">
+            <button
+              type="button"
+              className={`filter-pill ${conditionFilter === 'ALL' ? 'active' : ''}`}
+              onClick={() => setConditionFilter('ALL')}
+            >
+              All Returns <span className="pill-count">{counts.all}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${conditionFilter === 'RESTOCKED' ? 'active' : ''}`}
+              onClick={() => setConditionFilter('RESTOCKED')}
+            >
+              Restocked <span className="pill-count">{counts.restocked}</span>
+            </button>
+            <button
+              type="button"
+              className={`filter-pill ${conditionFilter === 'DAMAGED' ? 'active' : ''}`}
+              onClick={() => setConditionFilter('DAMAGED')}
+            >
+              Damaged <span className="pill-count">{counts.damaged}</span>
+            </button>
+          </div>
+        </div>
+        <div className="table-toolbar-right">
+          <span className="table-counter-text">
+            Showing {filtered.length} of {returns.length} {returns.length === 1 ? 'return' : 'returns'}
+          </span>
+        </div>
+      </div>
+
+      {filtered.length ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Return bill</th>
+                <th>Original invoice</th>
+                <th>Product</th>
+                <th>Date</th>
+                <th>Condition</th>
+                <th className="align-right">Refund</th>
+                <th>Receipt</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map((row) => (
+                <tr key={row.id}>
+                  <td>
+                    <b className="invoice-number">{row.bill_number}</b>
+                  </td>
+                  <td>{row.invoice_number || 'Unlinked'}</td>
+                  <td>
+                    {row.product_name_snapshot}
+                    <small>
+                      {formatQuantity(row.quantity)} {row.unit_snapshot}
+                    </small>
+                  </td>
+                  <td>{row.movement_date}</td>
+                  <td>
+                    <span className={`pill ${row.restock ? 'pill-green' : 'pill-rust'}`}>
+                      {row.restock ? 'Restocked' : 'Damaged'}
+                    </span>
+                  </td>
+                  <td className="align-right numeric">
+                    {formatMoney(row.refund_amount)}
+                  </td>
+                  <td>
+                    {onPrint && (
+                      <button
+                        className="icon-button"
+                        type="button"
+                        title={`Print ${row.bill_number}`}
+                        aria-label={`Print ${row.bill_number}`}
+                        onClick={() => onPrint(row)}
+                      >
+                        <Printer size={15} />
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="empty-filter-state">
+          <Search size={22} />
+          <p>
+            No returns found matching <b>"{query}"</b>
+            {conditionFilter !== 'ALL' ? ` with condition "${conditionFilter.toLowerCase()}"` : ''}
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              setQuery('');
+              setConditionFilter('ALL');
+            }}
+          >
+            Reset Filters
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 
