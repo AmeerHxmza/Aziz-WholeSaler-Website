@@ -184,8 +184,11 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
               <span>Invoice: <b>{sale.invoice_number}</b></span>
               <span>Date: {sale.sale_date}</span>
             </div>
-            {sale.customer_name && (
-              <div style={{ marginTop: '0.5mm' }}>Customer: <b>{sale.customer_name}</b></div>
+            {(sale.customer_name || sale.customer_phone) && (
+              <div style={{ marginTop: '0.8mm', paddingTop: '0.6mm', borderTop: '1px dotted #ccc', fontSize: '8.5px' }}>
+                {sale.customer_name && <div>Customer: <b>{sale.customer_name}</b></div>}
+                {sale.customer_phone && <div>Mobile: <b>{sale.customer_phone}</b></div>}
+              </div>
             )}
           </div>
 

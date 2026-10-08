@@ -884,12 +884,14 @@ create or replace function public.create_product(
   p_sale_price numeric,
   p_minimum_stock numeric default 10,
   p_opening_stock numeric default 0,
-  p_sku text default null
+  p_sku text default null,
+  p_id uuid default null
 )
 returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
 declare
   v_owner uuid := auth.uid();
-  v_id uuid := gen_random_uuid();
+  v_id uuid;
+  v_existing_id uuid;
 begin
   if v_owner is null or not public.is_shop_admin() then
     raise exception 'Sign in as the shop administrator before creating a product.';
@@ -905,6 +907,46 @@ begin
      p_opening_stock < 0 or p_opening_stock > 1000000 or p_opening_stock <> round(p_opening_stock, 3) then
     raise exception 'Stock quantities must be between 0 and 1,000,000 with at most 3 decimals.';
   end if;
+
+  -- 1. Check if a product with the same name already exists for this owner
+  select id into v_existing_id from public.products
+  where owner_id = v_owner and lower(trim(name)) = lower(trim(p_name))
+  limit 1;
+
+  if v_existing_id is not null then
+    update public.products
+    set
+      current_stock = current_stock + p_opening_stock,
+      purchase_cost = p_purchase_cost,
+      average_cost = case when (current_stock + p_opening_stock) > 0
+                     then round(((current_stock * average_cost) + (p_opening_stock * p_purchase_cost)) / (current_stock + p_opening_stock), 6)
+                     else p_purchase_cost end,
+      sale_price = p_sale_price,
+      default_sale_price = p_sale_price,
+      minimum_stock = p_minimum_stock,
+      low_stock_threshold = p_minimum_stock,
+      active = true,
+      is_active = true,
+      updated_at = now()
+    where id = v_existing_id;
+
+    if p_opening_stock > 0 then
+      insert into public.inventory_movements(
+        owner_id, product_id, movement_type, quantity_delta, unit_cost_snapshot,
+        reference_type, reference_id, notes, created_by
+      )
+      values(
+        v_owner, v_existing_id, 'STOCK_IN', p_opening_stock, p_purchase_cost,
+        'STOCK_ENTRY', format('STK-%s-%s', to_char(current_date, 'YYYYMMDD'), upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 8))),
+        'Added to existing product', v_owner
+      );
+    end if;
+
+    return jsonb_build_object('id', v_existing_id, 'updated', true);
+  end if;
+
+  -- 2. New product insertion with specified or generated ID
+  v_id := coalesce(p_id, gen_random_uuid());
 
   insert into public.products(
     id, owner_id, name, sku, unit, current_stock, average_cost, default_sale_price,
@@ -941,7 +983,7 @@ begin
   insert into public.audit_log(owner_id, action, entity_type, entity_id, details)
   values(v_owner, 'PRODUCT_CREATED', 'PRODUCT', v_id::text, format('Created product %s', trim(p_name)));
 
-  return jsonb_build_object('id', v_id);
+  return jsonb_build_object('id', v_id, 'created', true);
 end $$;
 
 -- F. UPDATE PRODUCT

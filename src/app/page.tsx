@@ -36,8 +36,10 @@ import {
   createOfflineSale,
   createOfflineReturn,
   recordOfflineStock,
-  saveOfflineProduct
+  saveOfflineProduct,
+  deduplicateLocalProducts
 } from '@/lib/db/offline-operations';
+import { SearchableProductSelect } from '@/components/SearchableProductSelect';
 import { syncEngine, type SyncStatusState } from '@/lib/sync/sync-engine';
 import {
   amount,
@@ -77,6 +79,8 @@ type Sale = {
   id: string;
   invoice_number: string;
   sale_date: string;
+  customer_name?: string | null;
+  customer_phone?: string | null;
   net_total: number;
   original_profit?: number;
   status: string;
@@ -115,6 +119,8 @@ type ReceiptRecord = {
   number: string;
   date: string;
   reference?: string;
+  customerName?: string | null;
+  customerPhone?: string | null;
   totalLabel: string;
   total: number;
   notes?: string;
@@ -124,7 +130,6 @@ type Tab =
   | 'overview'
   | 'sales'
   | 'products'
-  | 'stock'
   | 'returns'
   | 'money'
   | 'reports'
@@ -146,7 +151,6 @@ const navItems: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
   { id: 'sales', label: 'New sale', icon: ShoppingCart },
   { id: 'products', label: 'Products', icon: Boxes },
-  { id: 'stock', label: 'Stock', icon: PackagePlus },
   { id: 'returns', label: 'Returns', icon: Undo2 },
   { id: 'money', label: 'Money ledger', icon: Coins },
   { id: 'reports', label: 'Reports', icon: ChartNoAxesCombined },
@@ -158,6 +162,8 @@ function saleReceipt(sale: Sale): ReceiptRecord {
     kind: 'SALE',
     number: sale.invoice_number,
     date: sale.sale_date,
+    customerName: sale.customer_name,
+    customerPhone: sale.customer_phone,
     totalLabel: 'TOTAL',
     total: sale.net_total,
     items: sale.items.map((item) => ({
@@ -170,13 +176,16 @@ function saleReceipt(sale: Sale): ReceiptRecord {
   };
 }
 
-function savedReturnReceipt(selected: ReturnRow, returns: ReturnRow[]): ReceiptRecord {
+function savedReturnReceipt(selected: ReturnRow, returns: ReturnRow[], sales?: Sale[]): ReceiptRecord {
   const rows = returns.filter((row) => row.bill_number === selected.bill_number);
+  const matchedSale = sales?.find((s) => (selected.sale_id && s.id === selected.sale_id) || (selected.invoice_number && s.invoice_number === selected.invoice_number));
   return {
     kind: 'RETURN',
     number: selected.bill_number,
     date: selected.movement_date,
     reference: selected.invoice_number || undefined,
+    customerName: matchedSale?.customer_name,
+    customerPhone: matchedSale?.customer_phone,
     totalLabel: 'REFUND',
     total: roundMoney(rows.reduce((sum, row) => sum + row.refund_amount, 0)),
     notes: selected.reason,
@@ -344,6 +353,7 @@ export default function Home() {
 
   async function refreshFromOfflineDb() {
     try {
+      await deduplicateLocalProducts();
       const localProducts = await offlineDb.products.toArray();
       const localSales = await offlineDb.sales.orderBy('created_at').reverse().toArray();
       const localSaleItems = await offlineDb.sale_items.toArray();
@@ -757,11 +767,17 @@ export default function Home() {
         }
       }
 
+      // 11-digit mobile validation
+      const cleanPhone = saleCustomerPhone.trim();
+      if (cleanPhone && cleanPhone.length !== 11) {
+        throw new Error('Customer mobile number must be exactly 11 digits (e.g. 03001234567).');
+      }
+
       setBusy(true);
       const offlineResult = await createOfflineSale({
         items,
         customerName: saleCustomerName.trim() || null,
-        customerPhone: saleCustomerPhone.trim() || null,
+        customerPhone: cleanPhone || null,
         notes: null
       });
 
@@ -769,6 +785,8 @@ export default function Home() {
         kind: 'SALE',
         number: offlineResult.sale.invoice_number,
         date: today(),
+        customerName: saleCustomerName.trim() || null,
+        customerPhone: cleanPhone || null,
         totalLabel: 'TOTAL',
         total: Number(offlineResult.sale.net_total),
         items: items.map((line) => {
@@ -1230,7 +1248,7 @@ export default function Home() {
             >
               <Icon size={17} strokeWidth={1.8} />
               <span>{label}</span>
-              {id === 'stock' && lowStock.length > 0 && (
+              {id === 'products' && lowStock.length > 0 && (
                 <i className="nav-count">{lowStock.length}</i>
               )}
             </button>
@@ -1391,8 +1409,8 @@ export default function Home() {
                     action={
                       <button
                         className="icon-button"
-                        title="Open stock"
-                        onClick={() => setTab('stock')}
+                        title="Open products"
+                        onClick={() => setTab('products')}
                       >
                         <ArrowLeftRight size={16} />
                       </button>
@@ -1497,11 +1515,15 @@ export default function Home() {
                             onChange={(event) => setSaleCustomerName(event.target.value)}
                           />
                         </Field>
-                        <Field label="Customer phone (optional)">
+                        <Field label="Customer mobile (11 digits, optional)">
                           <input
-                            placeholder="e.g. 0300-1234567"
+                            type="tel"
+                            maxLength={11}
+                            placeholder="03001234567 (11 digits)"
                             value={saleCustomerPhone}
-                            onChange={(event) => setSaleCustomerPhone(event.target.value)}
+                            onChange={(event) =>
+                              setSaleCustomerPhone(event.target.value.replace(/\D/g, '').slice(0, 11))
+                            }
                           />
                         </Field>
                       </div>
@@ -1524,32 +1546,25 @@ export default function Home() {
                             <div className={`bill-line ${isOverselling || isOutOfStock ? 'oversell' : ''}`} key={index}>
                               <div className="field product-pick">
                                 <span>Product</span>
-                                <select
+                                <SearchableProductSelect
+                                  products={activeProducts}
                                   value={line.productId}
-                                  onChange={(event) =>
+                                  placeholder="Search or choose product..."
+                                  onChange={(newProductId) => {
+                                    const selected = products.find((entry) => entry.id === newProductId);
                                     setCart(
                                       cart.map((item, itemIndex) =>
                                         itemIndex === index
                                           ? {
                                               ...item,
-                                              productId: event.target.value,
-                                              unitPrice:
-                                                products
-                                                  .find((entry) => entry.id === event.target.value)
-                                                  ?.sale_price.toFixed(2) || ''
+                                              productId: newProductId,
+                                              unitPrice: selected ? selected.sale_price.toFixed(2) : ''
                                             }
                                           : item
                                       )
-                                    )
-                                  }
-                                >
-                                  <option value="">Choose product...</option>
-                                  {activeProducts.map((item) => (
-                                    <option key={item.id} value={item.id}>
-                                      {item.name} · {formatQuantity(item.stock)} {item.unit} {item.stock <= 0 ? '(OUT OF STOCK)' : ''}
-                                    </option>
-                                  ))}
-                                </select>
+                                    );
+                                  }}
+                                />
 
                                 {product && (
                                   <div>
@@ -1859,46 +1874,20 @@ export default function Home() {
                   {editingProduct && <button className="button secondary" type="button" onClick={() => { setEditingProduct(null); setNewProduct({ name: '', unit: 'Box', purchase_cost: '', sale_price: '', minimum_stock: '10', opening_stock: '' }); }}>Cancel edit</button>}
                 </form>
               </section>
-              <section className="surface form-surface">
-                <SectionHead title="Correct a count" eyebrow="STOCK ADJUSTMENT" />
-                <p className="section-copy">Count the shelf first. A reason is saved with every correction.</p>
-                <form onSubmit={adjustStock} className="form-stack">
-                  <Field label="Product">
-                    <select value={adjustForm.productId} onChange={(event) => setAdjustForm({ ...adjustForm, productId: event.target.value })} required>
-                      <option value="">Choose product</option>
-                      {products.map((product) => <option key={product.id} value={product.id}>{product.name} · {formatQuantity(product.stock)} {product.unit}</option>)}
-                    </select>
-                  </Field>
-                  <Field label="Adjustment method">
-                    <select value={adjustForm.type} onChange={(event) => setAdjustForm({ ...adjustForm, type: event.target.value })}>
-                      <option value="PHYSICAL">Set counted quantity</option>
-                      <option value="INCREASE">Increase by quantity</option>
-                      <option value="DECREASE">Decrease by quantity</option>
-                    </select>
-                  </Field>
-                  {adjustForm.type === 'PHYSICAL' ? (
-                    <Field label="Physical count"><input type="number" min="0" step="0.001" value={adjustForm.physicalCount} onChange={(event) => setAdjustForm({ ...adjustForm, physicalCount: event.target.value })} required /></Field>
-                  ) : (
-                    <Field label="Adjustment quantity"><input type="number" min="0.001" step="0.001" value={adjustForm.quantity} onChange={(event) => setAdjustForm({ ...adjustForm, quantity: event.target.value })} required /></Field>
-                  )}
-                  <div className="form-row">
-                    <Field label="Date"><input type="date" value={adjustForm.date} onChange={(event) => setAdjustForm({ ...adjustForm, date: event.target.value })} required /></Field>
-                    <Field label="Reason"><input value={adjustForm.reason} onChange={(event) => setAdjustForm({ ...adjustForm, reason: event.target.value })} required /></Field>
-                  </div>
-                  <button className="button secondary" disabled={busy}><ArrowLeftRight size={15} /> Save adjustment</button>
-                </form>
-              </section>
               <section className="surface help-surface">
-                <p className="eyebrow">UNIT DISCIPLINE</p>
-                <h3>Choose once. Use consistently.</h3>
+                <p className="eyebrow">FAST INVENTORY</p>
+                <h3>Manage products & add stock</h3>
                 <p>
-                  The app will not turn cartons into pieces automatically. Record sales and
-                  inventory in the product’s chosen unit.
+                  Click the <b>+ Stock</b> button next to any product in the list below to instantly restock units, record purchase rates, or set opening stock.
                 </p>
-                <div className="rule-list">
-                  <span>Box stays box</span>
-                  <span>Kg stays kg</span>
-                  <span>Fractional quantities allowed to 3 decimals</span>
+                <div className="inline-stat" style={{ marginTop: '16px' }}>
+                  <span>Total stock valuation</span>
+                  <b>{formatMoney(stockValue)}</b>
+                </div>
+                <div className="rule-list" style={{ marginTop: '16px' }}>
+                  <span>Box stays box, Kg stays kg</span>
+                  <span>Direct stock additions with 1 click</span>
+                  <span>Instant real-time stock sync</span>
                 </div>
               </section>
               <section className="surface span-all">
@@ -1926,113 +1915,6 @@ export default function Home() {
               </section>
             </div>
           )}
-          {tab === 'stock' && (
-            <div className="page-grid">
-              <section className="surface form-surface">
-                <SectionHead title="Receive stock" eyebrow="PURCHASE / OPENING STOCK" />
-                <p className="section-copy">
-                  Purchase entries update the moving weighted-average buying cost.
-                </p>
-                <form onSubmit={addStock} className="form-stack">
-                  <Field label="Product">
-                    <select
-                      value={stockForm.productId}
-                      onChange={(event) =>
-                        setStockForm({ ...stockForm, productId: event.target.value })
-                      }
-                      required
-                    >
-                      <option value="">Choose product</option>
-                      {products.map((product) => (
-                        <option key={product.id} value={product.id}>
-                          {product.name} · {formatQuantity(product.stock)} {product.unit}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-                  <div className="form-row">
-                    <Field label="Entry type">
-                      <select
-                        value={stockForm.movementType}
-                        onChange={(event) =>
-                          setStockForm({ ...stockForm, movementType: event.target.value })
-                        }
-                      >
-                        <option value="PURCHASE">Purchase / restock</option>
-                        <option value="OPENING">Opening stock</option>
-                      </select>
-                    </Field>
-                    <Field label="Date">
-                      <input
-                        type="date"
-                        value={stockForm.date}
-                        onChange={(event) =>
-                          setStockForm({ ...stockForm, date: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
-                  </div>
-                  <div className="form-row">
-                    <Field label="Quantity">
-                      <input
-                        type="number"
-                        min="0.001"
-                        step="0.001"
-                        value={stockForm.quantity}
-                        onChange={(event) =>
-                          setStockForm({ ...stockForm, quantity: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
-                    <Field label="Buying rate (Rs.)">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={stockForm.purchaseCost}
-                        onChange={(event) =>
-                          setStockForm({ ...stockForm, purchaseCost: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
-                  </div>
-                  <Field label="Note">
-                    <input
-                      value={stockForm.notes}
-                      onChange={(event) =>
-                        setStockForm({ ...stockForm, notes: event.target.value })
-                      }
-                    />
-                  </Field>
-                  <button className="button primary" disabled={busy}>
-                    <PackagePlus size={16} /> Record stock
-                  </button>
-                </form>
-              </section>
-              <section className="surface help-surface">
-                <p className="eyebrow">WEIGHTED AVERAGE</p>
-                <h3>New stock changes the current cost.</h3>
-                <p>
-                  Average = (old quantity × old cost + received quantity × new cost) ÷ total
-                  quantity.
-                </p>
-                <div className="inline-stat">
-                  <span>Stock value now</span>
-                  <b>{formatMoney(stockValue)}</b>
-                </div>
-              </section>
-              <section className="surface span-all">
-                <SectionHead
-                  title="Current inventory"
-                  eyebrow={`${products.filter((item) => item.active).length} ACTIVE ITEMS`}
-                />
-                <ProductsTable products={products} onEdit={beginEditProduct} onToggleActive={toggleProductActive} onQuickStock={openQuickStock} />
-              </section>
-            </div>
-          )}
           {tab === 'returns' && (
             <div className="page-grid">
               <section className="surface form-surface">
@@ -2051,10 +1933,10 @@ export default function Home() {
                         })
                       }
                     >
-                      <option value="">No original bill</option>
+                      <option value="">No original bill (Direct return)</option>
                       {returnSales.map((sale) => (
                         <option key={sale.id} value={sale.id}>
-                          {sale.invoice_number} · {sale.sale_date} · {formatMoney(sale.net_total)}
+                          {sale.invoice_number} · {sale.sale_date} · {sale.customer_name ? `${sale.customer_name} · ` : ''}{formatMoney(sale.net_total)}
                         </option>
                       ))}
                     </select>
@@ -2097,20 +1979,15 @@ export default function Home() {
                   ) : (
                     <>
                       <Field label="Product">
-                        <select
+                        <SearchableProductSelect
+                          products={products}
                           value={returnForm.productId}
-                          onChange={(event) =>
-                            setReturnForm({ ...returnForm, productId: event.target.value })
+                          onChange={(id) =>
+                            setReturnForm({ ...returnForm, productId: id })
                           }
+                          placeholder="Search product for return..."
                           required
-                        >
-                          <option value="">Choose product</option>
-                          {products.map((product) => (
-                            <option key={product.id} value={product.id}>
-                              {product.name}
-                            </option>
-                          ))}
-                        </select>
+                        />
                       </Field>
                       <Field label="Refund amount (Rs.)">
                         <input
@@ -2243,7 +2120,7 @@ export default function Home() {
                               {formatMoney(row.refund_amount)}
                             </td>
                             <td>
-                              <button className="icon-button" type="button" title={`Print ${row.bill_number}`} aria-label={`Print ${row.bill_number}`} onClick={() => setReceipt(savedReturnReceipt(row, returns))}>
+                              <button className="icon-button" type="button" title={`Print ${row.bill_number}`} aria-label={`Print ${row.bill_number}`} onClick={() => setReceipt(savedReturnReceipt(row, returns, sales))}>
                                 <Printer size={15} />
                               </button>
                             </td>
@@ -3160,6 +3037,8 @@ function ReceiptPreview({
           {receipt.kind === 'RETURN' && <div className="receipt-rule" />}
           <div className="receipt-meta"><b>Bill:</b><span>{receipt.number}</span></div>
           <div className="receipt-meta"><b>Date:</b><span>{receipt.date}</span></div>
+          {receipt.customerName && <div className="receipt-meta"><b>Customer:</b><span>{receipt.customerName}</span></div>}
+          {receipt.customerPhone && <div className="receipt-meta"><b>Mobile:</b><span>{receipt.customerPhone}</span></div>}
           {receipt.reference && <div className="receipt-meta"><b>Original:</b><span>{receipt.reference}</span></div>}
           <div className="receipt-rule" />
           <div className="receipt-grid receipt-grid-head"><b>Item</b><b>Qty</b><b>Rate</b><b>Amount</b></div>

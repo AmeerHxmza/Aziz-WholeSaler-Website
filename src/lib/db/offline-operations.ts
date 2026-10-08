@@ -443,8 +443,47 @@ export async function recordOfflineStock(params: {
 }
 
 // -----------------------------------------------------------------------------
-// 4. CREATE / UPDATE OFFLINE PRODUCT
+// 4. CREATE / UPDATE OFFLINE PRODUCT (WITH AUTOMATIC DEDUPLICATION)
 // -----------------------------------------------------------------------------
+export async function deduplicateLocalProducts(): Promise<void> {
+  const allProducts = await offlineDb.products.toArray();
+  const byName = new Map<string, LocalProduct[]>();
+
+  for (const p of allProducts) {
+    const key = p.name.trim().toLowerCase();
+    if (!byName.has(key)) byName.set(key, []);
+    byName.get(key)!.push(p);
+  }
+
+  for (const [, group] of byName) {
+    if (group.length > 1) {
+      // Sort: highest stock first, then latest updated
+      group.sort((a, b) => (b.current_stock - a.current_stock) || b.updated_at.localeCompare(a.updated_at));
+      const keeper = group[0];
+      const duplicates = group.slice(1);
+
+      let mergedStock = keeper.current_stock;
+      for (const dup of duplicates) {
+        if (dup.current_stock > 0) {
+          mergedStock += dup.current_stock;
+        }
+        await offlineDb.products.delete(dup.id);
+        await offlineDb.sale_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
+        await offlineDb.return_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
+        await offlineDb.stock_entry_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
+        await offlineDb.inventory_movements.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
+      }
+
+      if (mergedStock !== keeper.current_stock) {
+        await offlineDb.products.update(keeper.id, {
+          current_stock: mergedStock,
+          updated_at: new Date().toISOString()
+        });
+      }
+    }
+  }
+}
+
 export async function saveOfflineProduct(params: {
   id?: string;
   name: string;
@@ -463,36 +502,66 @@ export async function saveOfflineProduct(params: {
       offlineDb.sync_queue
     ],
     async () => {
-      const isEditing = Boolean(params.id);
-      const productId = params.id || crypto.randomUUID();
+      const normalizedName = params.name.trim().toLowerCase();
       const operationId = crypto.randomUUID();
       const openingStock = params.openingStock || 0;
 
+      // 1. Check if editing by ID or if a product with the same name already exists
+      let existing: LocalProduct | undefined;
+      if (params.id) {
+        existing = await offlineDb.products.get(params.id);
+      } else {
+        const allProducts = await offlineDb.products.toArray();
+        existing = allProducts.find((p) => p.name.trim().toLowerCase() === normalizedName);
+      }
+
       let product: LocalProduct;
 
-      if (isEditing) {
-        const existing = await offlineDb.products.get(productId);
-        if (!existing) throw new Error('Product not found for editing.');
+      if (existing) {
+        // Product already exists: update details and add any opening stock entered
+        const currentStock = Number(existing.current_stock || 0);
+        const currentAvg = Number(existing.average_cost || existing.purchase_cost || 0);
+        const newStock = roundMoney(currentStock + openingStock);
+        const newAverage =
+          newStock > 0 && openingStock > 0
+            ? roundMoney((currentStock * currentAvg + openingStock * params.purchaseCost) / newStock)
+            : (existing.average_cost || params.purchaseCost);
 
         product = {
           ...existing,
           name: params.name.trim(),
           unit: params.unit.trim(),
-          sale_price: params.salePrice,
+          current_stock: newStock,
+          average_cost: newAverage,
           purchase_cost: params.purchaseCost,
+          sale_price: params.salePrice,
           minimum_stock: params.minimumStock,
           active: params.active ?? existing.active,
           updated_at: new Date().toISOString()
         };
         await offlineDb.products.put(product);
 
+        if (openingStock > 0) {
+          await offlineDb.inventory_movements.add({
+            id: crypto.randomUUID(),
+            product_id: product.id,
+            movement_type: 'STOCK_IN',
+            quantity_delta: openingStock,
+            unit_cost_snapshot: params.purchaseCost,
+            reference_type: 'STOCK_ENTRY',
+            reference_id: product.id,
+            notes: 'Stock added to existing product',
+            created_at: new Date().toISOString()
+          });
+        }
+
         await offlineDb.sync_queue.add({
           id: crypto.randomUUID(),
           operation_id: operationId,
           operation_type: 'UPDATE_PRODUCT',
-          entity_id: productId,
+          entity_id: product.id,
           payload: {
-            id: productId,
+            id: product.id,
             name: product.name,
             unit: product.unit,
             purchaseCost: product.purchase_cost,
@@ -507,6 +576,8 @@ export async function saveOfflineProduct(params: {
           created_at: new Date().toISOString()
         });
       } else {
+        // Brand new product
+        const productId = params.id || crypto.randomUUID();
         product = {
           id: productId,
           name: params.name.trim(),

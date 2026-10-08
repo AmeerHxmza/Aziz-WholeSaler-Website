@@ -204,7 +204,8 @@ class SyncEngine {
             p_purchase_cost: payload.purchaseCost,
             p_sale_price: payload.salePrice,
             p_minimum_stock: payload.minimumStock,
-            p_opening_stock: payload.openingStock
+            p_opening_stock: payload.openingStock,
+            p_id: payload.id
           });
           if (error && !error.message.includes('duplicate')) throw error;
           break;

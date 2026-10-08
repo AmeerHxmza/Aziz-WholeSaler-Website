@@ -6,6 +6,8 @@ export type ReceiptPdfDocument = {
   number: string;
   date: string;
   reference?: string;
+  customerName?: string | null;
+  customerPhone?: string | null;
   totalLabel: string;
   total: number;
   notes?: string;
@@ -85,6 +87,8 @@ export function createReceiptPdf(document: ReceiptPdfDocument, settings: Receipt
   // 2. Metadata (Left aligned at CONTENT_LEFT = 5mm)
   addText(`Bill: ${document.number}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
   addText(`Date: ${document.date}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
+  if (document.customerName) addText(`Customer: ${document.customerName}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, true);
+  if (document.customerPhone) addText(`Mobile: ${document.customerPhone}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, true);
   if (document.reference) addText(`Original: ${document.reference}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
 
   // 3. Table Header
