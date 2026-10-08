@@ -1528,171 +1528,195 @@ export default function Home() {
                         </Field>
                       </div>
 
-                      <div className="bill-lines">
-                        {cart.map((line, index) => {
-                          const product = products.find((item) => item.id === line.productId);
-                          const qtyNum = Number(line.quantity) || 0;
-                          const isOverselling = Boolean(product && qtyNum > product.stock);
-                          const isOutOfStock = Boolean(product && product.stock <= 0);
-                          const isLowStock = Boolean(product && product.stock > 0 && product.stock <= product.minimum_stock);
-                          const lineTotal = product
-                            ? lineAmount(
-                                qtyNum,
-                                Number(line.unitPrice || product.sale_price)
-                              )
-                            : 0;
+                      <div className="pos-bill-table-wrap">
+                        <div className="pos-table-header">
+                          <span style={{ textAlign: 'center' }}>#</span>
+                          <span>Product</span>
+                          <span style={{ textAlign: 'center' }}>Available</span>
+                          <span style={{ textAlign: 'center' }}>Quantity</span>
+                          <span>Rate (Rs.)</span>
+                          <span style={{ textAlign: 'right' }}>Line Total</span>
+                          <span></span>
+                        </div>
 
-                          return (
-                            <div className={`bill-line ${isOverselling || isOutOfStock ? 'oversell' : ''}`} key={index}>
-                              <div className="field product-pick">
-                                <span>Product</span>
-                                <SearchableProductSelect
-                                  products={activeProducts}
-                                  value={line.productId}
-                                  placeholder="Search or choose product..."
-                                  onChange={(newProductId) => {
-                                    const selected = products.find((entry) => entry.id === newProductId);
-                                    setCart(
-                                      cart.map((item, itemIndex) =>
-                                        itemIndex === index
-                                          ? {
-                                              ...item,
-                                              productId: newProductId,
-                                              unitPrice: selected ? selected.sale_price.toFixed(2) : ''
-                                            }
-                                          : item
-                                      )
-                                    );
-                                  }}
-                                />
+                        <div className="pos-bill-table">
+                          {cart.map((line, index) => {
+                            const product = products.find((item) => item.id === line.productId);
+                            const qtyNum = Number(line.quantity) || 0;
+                            const isOverselling = Boolean(product && qtyNum > product.stock);
+                            const isOutOfStock = Boolean(product && product.stock <= 0);
+                            const isLowStock = Boolean(product && product.stock > 0 && product.stock <= product.minimum_stock);
+                            const lineTotal = product
+                              ? lineAmount(
+                                  qtyNum,
+                                  Number(line.unitPrice || product.sale_price)
+                                )
+                              : 0;
 
-                                {product && (
-                                  <div>
-                                    {product.stock <= 0 ? (
-                                      <span className="stock-pill error">
-                                        🚫 OUT OF STOCK (0 {product.unit} on shelf)
-                                      </span>
-                                    ) : isOverselling ? (
-                                      <span className="stock-pill error">
-                                        ⛔ EXCEEDS STOCK! Only {formatQuantity(product.stock)} {product.unit} available
-                                      </span>
-                                    ) : isLowStock ? (
-                                      <span className="stock-pill low">
-                                        ⚠️ Low stock: {formatQuantity(product.stock)} {product.unit} available
-                                      </span>
-                                    ) : (
-                                      <span className="stock-pill ok">
-                                        ✓ In stock: {formatQuantity(product.stock)} {product.unit} available
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-                              </div>
+                            return (
+                              <div
+                                key={index}
+                                className={`pos-table-row ${isOverselling || isOutOfStock ? 'oversell' : ''}`}
+                              >
+                                <span className="pos-col-idx">{index + 1}</span>
 
-                              <Field label={`Quantity ${product ? `(${product.unit})` : ''}`}>
-                                <div className="qty-stepper-wrap">
-                                  <button
-                                    type="button"
-                                    className="qty-step-btn minus"
-                                    title="Decrease quantity"
-                                    disabled={qtyNum <= 1}
-                                    onClick={() => {
-                                      const next = Math.max(1, qtyNum - 1);
+                                <div className="pos-col-prod">
+                                  <SearchableProductSelect
+                                    products={activeProducts}
+                                    value={line.productId}
+                                    placeholder="Search product..."
+                                    onChange={(newProductId) => {
+                                      const selected = products.find((entry) => entry.id === newProductId);
                                       setCart(
-                                        cart.map((item, i) =>
-                                          i === index ? { ...item, quantity: String(next) } : item
+                                        cart.map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? {
+                                                ...item,
+                                                productId: newProductId,
+                                                unitPrice: selected ? selected.sale_price.toFixed(2) : ''
+                                              }
+                                            : item
                                         )
                                       );
                                     }}
-                                  >
-                                    −
-                                  </button>
+                                  />
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                                  {!product ? (
+                                    <span className="pos-stock-badge none">—</span>
+                                  ) : product.stock <= 0 ? (
+                                    <span className="pos-stock-badge out">0 {product.unit} (Out)</span>
+                                  ) : isLowStock ? (
+                                    <span className="pos-stock-badge low" title="Low stock warning">
+                                      {formatQuantity(product.stock)} {product.unit}
+                                    </span>
+                                  ) : (
+                                    <span className="pos-stock-badge ok">
+                                      {formatQuantity(product.stock)} {product.unit}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <div className="pos-qty-group">
+                                    <button
+                                      type="button"
+                                      title="Decrease quantity"
+                                      disabled={qtyNum <= 1}
+                                      onClick={() => {
+                                        const next = Math.max(1, qtyNum - 1);
+                                        setCart(
+                                          cart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(next) } : item
+                                          )
+                                        );
+                                      }}
+                                    >
+                                      −
+                                    </button>
+                                    <input
+                                      type="number"
+                                      min="0.001"
+                                      step="any"
+                                      value={line.quantity}
+                                      onChange={(event) =>
+                                        setCart(
+                                          cart.map((item, itemIndex) =>
+                                            itemIndex === index
+                                              ? { ...item, quantity: event.target.value }
+                                              : item
+                                          )
+                                        )
+                                      }
+                                    />
+                                    <button
+                                      type="button"
+                                      title="Increase quantity"
+                                      disabled={product ? qtyNum >= product.stock : false}
+                                      onClick={() => {
+                                        const next = qtyNum + 1;
+                                        setCart(
+                                          cart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(next) } : item
+                                          )
+                                        );
+                                      }}
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div>
                                   <input
                                     type="number"
-                                    min="0.001"
-                                    step="any"
-                                    value={line.quantity}
+                                    min="0"
+                                    step="0.01"
+                                    className="pos-price-input"
+                                    value={line.unitPrice}
                                     onChange={(event) =>
                                       setCart(
                                         cart.map((item, itemIndex) =>
                                           itemIndex === index
-                                            ? { ...item, quantity: event.target.value }
+                                            ? { ...item, unitPrice: event.target.value }
                                             : item
                                         )
                                       )
                                     }
                                   />
-                                  <button
-                                    type="button"
-                                    className="qty-step-btn plus"
-                                    title="Increase quantity"
-                                    disabled={product ? qtyNum >= product.stock : false}
-                                    onClick={() => {
-                                      const next = qtyNum + 1;
-                                      setCart(
-                                        cart.map((item, i) =>
-                                          i === index ? { ...item, quantity: String(next) } : item
-                                        )
-                                      );
-                                    }}
-                                  >
-                                    +
-                                  </button>
                                 </div>
-                                {isOverselling && product && product.stock > 0 && (
+
+                                <div className="pos-total-cell">
+                                  {formatMoney(lineTotal)}
+                                </div>
+
+                                <div>
                                   <button
                                     type="button"
-                                    className="quick-set-btn"
-                                    title="Set quantity to maximum available stock"
+                                    className="pos-del-btn"
+                                    title="Remove item"
+                                    disabled={cart.length === 1}
                                     onClick={() =>
-                                      setCart(
-                                        cart.map((item, i) =>
-                                          i === index ? { ...item, quantity: String(product.stock) } : item
-                                        )
-                                      )
+                                      setCart(cart.filter((_item, itemIndex) => itemIndex !== index))
                                     }
                                   >
-                                    ⚡ Set to max ({formatQuantity(product.stock)} {product.unit})
+                                    <X size={15} />
                                   </button>
+                                </div>
+
+                                {isOverselling && product && product.stock > 0 && (
+                                  <div className="pos-row-warning">
+                                    <span>
+                                      ⛔ Exceeds available stock! Only {formatQuantity(product.stock)} {product.unit} available in store.
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="quick-set-btn"
+                                      onClick={() =>
+                                        setCart(
+                                          cart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(product.stock) } : item
+                                          )
+                                        )
+                                      }
+                                    >
+                                      ⚡ Set to max ({formatQuantity(product.stock)} {product.unit})
+                                    </button>
+                                  </div>
                                 )}
-                              </Field>
 
-                              <Field label="Rate (Rs.)">
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="0.01"
-                                  value={line.unitPrice}
-                                  onChange={(event) =>
-                                    setCart(
-                                      cart.map((item, itemIndex) =>
-                                        itemIndex === index
-                                          ? { ...item, unitPrice: event.target.value }
-                                          : item
-                                      )
-                                    )
-                                  }
-                                />
-                              </Field>
-
-                              <div className="line-total">
-                                <small>LINE TOTAL</small>
-                                <b>{formatMoney(lineTotal)}</b>
+                                {isOutOfStock && product && (
+                                  <div className="pos-row-warning">
+                                    <span>
+                                      🚫 Product is completely out of stock (0 {product.unit}). Please select another item or restock.
+                                    </span>
+                                  </div>
+                                )}
                               </div>
-
-                              <button
-                                type="button"
-                                className="icon-button remove-line"
-                                title="Remove line"
-                                onClick={() =>
-                                  setCart(cart.filter((_item, itemIndex) => itemIndex !== index))
-                                }
-                              >
-                                <X size={15} />
-                              </button>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
                       </div>
 
                       <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>

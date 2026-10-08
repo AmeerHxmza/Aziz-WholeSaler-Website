@@ -156,29 +156,21 @@ export function SearchableProductSelect({
         aria-haspopup="listbox"
         aria-expanded={isOpen}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', flex: 1, minWidth: 0 }}>
           <Search size={14} style={{ color: '#9ca3af', flexShrink: 0 }} />
           {selectedProduct ? (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-              <span style={{ fontWeight: 600, color: '#111827' }}>{selectedProduct.name}</span>
-              <span style={{ fontSize: '11px', color: '#6b7280' }}>
-                ({selectedProduct.unit} · {formatMoney(selectedProduct.sale_price)})
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden', minWidth: 0, flex: 1 }}>
+              <span style={{ fontWeight: 600, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, minWidth: 0 }}>
+                {selectedProduct.name}
               </span>
-              <span
-                style={{
-                  fontSize: '10.5px',
-                  padding: '1px 6px',
-                  borderRadius: '10px',
-                  fontWeight: 600,
-                  backgroundColor: selectedProduct.stock <= 0 ? '#fee2e2' : selectedProduct.stock <= (selectedProduct.minimum_stock ?? 10) ? '#fef3c7' : '#dcfce7',
-                  color: selectedProduct.stock <= 0 ? '#b91c1c' : selectedProduct.stock <= (selectedProduct.minimum_stock ?? 10) ? '#b45309' : '#15803d'
-                }}
-              >
-                {selectedProduct.stock <= 0 ? 'Out of stock' : `${formatQuantity(selectedProduct.stock)} in stock`}
+              <span style={{ fontSize: '11px', color: '#6b7280', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                ({selectedProduct.unit})
               </span>
             </div>
           ) : (
-            <span style={{ color: '#9ca3af' }}>{placeholder}</span>
+            <span style={{ color: '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {placeholder}
+            </span>
           )}
         </div>
 

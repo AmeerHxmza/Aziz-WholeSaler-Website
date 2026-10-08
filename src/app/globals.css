@@ -198,6 +198,213 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 4px; 
 .line-total b { color: #354c3c; font: 13px Georgia,serif; }
 .remove-line { margin-top: 24px; }
 .add-line { justify-self: start; }
+
+/* Professional High-Density Wholesale Bill Table */
+.pos-bill-table-wrap {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+  overflow-x: auto;
+}
+
+.pos-table-header {
+  display: grid;
+  grid-template-columns: 36px minmax(280px, 2.6fr) minmax(110px, 0.9fr) minmax(135px, 1fr) minmax(115px, 0.9fr) minmax(130px, 1fr) 36px;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #f1f4f0;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #4b5a50;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  align-items: center;
+}
+
+.pos-bill-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pos-table-row {
+  display: grid;
+  grid-template-columns: 36px minmax(280px, 2.6fr) minmax(110px, 0.9fr) minmax(135px, 1fr) minmax(115px, 0.9fr) minmax(130px, 1fr) 36px;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #ffffff;
+  border: 1px solid #e2e6e0;
+  border-radius: 6px;
+  align-items: center;
+  transition: all 0.15s ease;
+}
+
+.pos-table-row:hover {
+  border-color: #cbd5cb;
+  background: #fafbfa;
+}
+
+.pos-table-row.oversell {
+  border: 1.5px solid #ef4444 !important;
+  background: #fff5f5 !important;
+}
+
+.pos-col-idx {
+  color: #8a968d;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.pos-col-prod {
+  min-width: 0;
+}
+
+.pos-stock-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.pos-stock-badge.ok {
+  background: #dcfce7;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+
+.pos-stock-badge.low {
+  background: #fef3c7;
+  color: #b45309;
+  border: 1px solid #fde68a;
+}
+
+.pos-stock-badge.out {
+  background: #fee2e2;
+  color: #b91c1c;
+  border: 1px solid #fca5a5;
+  font-weight: 700;
+}
+
+.pos-stock-badge.none {
+  color: #9ca3af;
+  font-size: 13px;
+}
+
+.pos-qty-group {
+  display: flex;
+  align-items: center;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #fff;
+  height: 38px;
+}
+
+.pos-qty-group input {
+  width: 100%;
+  border: none !important;
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 0 4px !important;
+  height: 100% !important;
+  box-shadow: none !important;
+  background: transparent !important;
+}
+
+.pos-qty-group button {
+  width: 32px;
+  height: 100%;
+  border: none;
+  background: #f3f4f6;
+  color: #374151;
+  font-size: 16px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s;
+  flex-shrink: 0;
+}
+
+.pos-qty-group button:hover:not(:disabled) {
+  background: #e5e7eb;
+}
+
+.pos-qty-group button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pos-price-input {
+  height: 38px !important;
+  border: 1px solid #d1d5db !important;
+  border-radius: 4px !important;
+  padding: 0 10px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  color: #1f2937 !important;
+  width: 100% !important;
+  box-sizing: border-box !important;
+}
+
+.pos-total-cell {
+  font-family: Georgia, serif;
+  font-size: 15px;
+  font-weight: 700;
+  color: #264b3b;
+  text-align: right;
+  padding-right: 4px;
+  white-space: nowrap;
+}
+
+.pos-del-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: #9ca3af;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.pos-del-btn:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.pos-del-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+}
+
+.pos-row-warning {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  font-size: 11.5px;
+  color: #b91c1c;
+  font-weight: 600;
+  margin-top: 4px;
+}
 .bill-total { display: flex; align-items: center; justify-content: space-between; padding: 16px 0; border-top: 1px solid #e4e8e1; color: #68736a; font-size: 11px; }
 .bill-total strong { color: #283c30; font: 25px Georgia,serif; }
 .inline-stat { display: flex; justify-content: space-between; margin-top: 22px; padding-top: 14px; border-top: 1px solid #e5e8e1; color: #788178; font-size: 10px; }
