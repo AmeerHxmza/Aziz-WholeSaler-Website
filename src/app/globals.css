@@ -81,7 +81,7 @@ button:disabled { cursor: wait; opacity: .55; }
 .metric-card p { position: static; margin: 0 0 3px; color: #68756a; font-size: 11px; font-weight: 600; }
 .metric-card strong { display: block; font: 20px/1.2 Georgia,serif; letter-spacing: 0; color: #1e2c24; }
 .metric-card small { display: block; margin-top: 2px; color: #8a948a; font-size: 9.5px; }
-.overview-grid { display: grid; grid-template-columns: minmax(0,1.85fr) minmax(280px,1fr); gap: 12px; }
+.overview-grid { display: grid; grid-template-columns: 1fr; gap: 12px; width: 100%; }
 .bottom-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
 .surface { min-width: 0; border: 1px solid var(--line); background: var(--white); box-shadow: var(--shadow); border-radius: 4px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 48px; padding: 10px 16px; }

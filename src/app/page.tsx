@@ -1368,7 +1368,7 @@ export default function Home() {
                 />
               </div>
               <div className="overview-grid">
-                <section className="surface">
+                <section className="surface span-all">
                   <SectionHead
                     title="Recent bills"
                     eyebrow="SALES BOOK"
@@ -1378,49 +1378,7 @@ export default function Home() {
                       </button>
                     }
                   />
-                  <SalesTable sales={sales.slice(0, 7)} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
-                </section>
-                <section className="surface stock-watch">
-                  <SectionHead
-                    title="Needs attention"
-                    eyebrow="STOCK WATCH"
-                    action={
-                      <button
-                        className="icon-button"
-                        title="Open products"
-                        onClick={() => setTab('products')}
-                      >
-                        <ArrowLeftRight size={16} />
-                      </button>
-                    }
-                  />
-                  {lowStock.length ? (
-                    lowStock.slice(0, 6).map((product) => (
-                      <div className="watch-row" key={product.id}>
-                        <span className={`status-dot ${product.stock <= 0 ? 'danger' : ''}`} />
-                        <div>
-                          <b>{product.name}</b>
-                          <small>
-                            {product.stock <= 0
-                              ? 'Out of stock'
-                              : `Reorder at ${formatQuantity(product.minimum_stock)} ${product.unit}`}
-                          </small>
-                        </div>
-                        <strong>
-                          {formatQuantity(product.stock)} <small>{product.unit}</small>
-                        </strong>
-                      </div>
-                    ))
-                  ) : (
-                    <div className="quiet-empty">
-                      <span>✓</span>
-                      <p>All active products are above their warning level.</p>
-                    </div>
-                  )}
-                  <div className="stock-value">
-                    <span>Current stock value</span>
-                    <b>{formatMoney(stockValue)}</b>
-                  </div>
+                  <SalesTable sales={sales.slice(0, 10)} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
                 </section>
               </div>
               <div className="bottom-grid">
