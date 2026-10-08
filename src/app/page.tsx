@@ -273,15 +273,13 @@ export default function Home() {
     reason: '',
     date: today()
   });
-  const [returnForm, setReturnForm] = useState({
-    saleId: '',
-    productId: '',
-    quantity: '',
-    restock: true,
-    reason: 'Customer return',
-    date: today(),
-    refund: ''
-  });
+  const [returnSaleId, setReturnSaleId] = useState('');
+  const [returnReason, setReturnReason] = useState('Customer return');
+  const [returnDate, setReturnDate] = useState(today());
+  const [returnCart, setReturnCart] = useState<Array<{
+    productId: string;
+    quantity: string;
+  }>>([{ productId: '', quantity: '1' }]);
   const [loanForm, setLoanForm] = useState({
     person: '',
     type: 'GIVEN' as 'GIVEN' | 'TAKEN',
@@ -583,10 +581,42 @@ export default function Home() {
     return true;
   });
   const returnSales = sales.filter((sale) => ['COMPLETED', 'PARTIALLY_RETURNED', 'CONFIRMED'].includes(sale.status));
-  const selectedReturnSale = returnSales.find((sale) => sale.id === returnForm.saleId);
-  const selectedReturnItem = selectedReturnSale?.items.find(
-    (item) => item.product_id === returnForm.productId
-  );
+  const selectedReturnSale = returnSales.find((sale) => sale.id === returnSaleId);
+  const returnableInvoiceItems = selectedReturnSale
+    ? selectedReturnSale.items.map((item) => {
+        const alreadyReturned = returns
+          .filter((r) => r.sale_id === returnSaleId && r.product_id === item.product_id)
+          .reduce((sum, r) => sum + r.quantity, 0);
+        const remaining = Math.max(0, item.quantity - alreadyReturned);
+        return {
+          ...item,
+          alreadyReturned,
+          remaining
+        };
+      })
+    : [];
+
+  const invoiceProductsAsList: Product[] = returnableInvoiceItems.map((item) => {
+    const existingProd = products.find((p) => p.id === item.product_id);
+    return {
+      id: item.product_id,
+      name: item.product_name_snapshot,
+      unit: item.unit_snapshot,
+      purchase_cost: existingProd?.purchase_cost || 0,
+      sale_price: item.unit_price,
+      stock: item.remaining,
+      minimum_stock: 0,
+      active: true,
+      created_at: ''
+    };
+  });
+
+  const returnTotal = returnCart.reduce((sum, line) => {
+    const invItem = returnableInvoiceItems.find((it) => it.product_id === line.productId);
+    const qtyNum = Number(line.quantity) || 0;
+    const rate = invItem ? invItem.unit_price : 0;
+    return sum + lineAmount(qtyNum, rate);
+  }, 0);
   const getSaleProfit = (s: Sale): number => {
     if (s.items && s.items.length > 0) {
       return s.items.reduce(
@@ -919,45 +949,66 @@ export default function Home() {
   async function createReturn(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
-      const qty = quantity(returnForm.quantity);
-      if (!returnForm.saleId) throw new Error('Please select the original sales bill to return items from.');
-      if (!returnForm.productId) throw new Error('Choose a product to return.');
-      const selectedProduct = products.find((product) => product.id === returnForm.productId);
+      if (!returnSaleId) throw new Error('Please select the original sales bill to return items from.');
+
+      const validLines = returnCart.filter((line) => line.productId && Number(line.quantity) > 0);
+      if (!validLines.length) throw new Error('Please choose at least one product with a valid quantity to return.');
+
+      // Check duplicates
+      const productIds = validLines.map((l) => l.productId);
+      if (new Set(productIds).size !== productIds.length) {
+        throw new Error('Duplicate product in return list. Please combine items into a single row.');
+      }
+
+      // Check returnable limits
+      for (const line of validLines) {
+        const invItem = returnableInvoiceItems.find((it) => it.product_id === line.productId);
+        const reqQty = Number(line.quantity);
+        if (invItem && reqQty > invItem.remaining) {
+          throw new Error(
+            `Cannot return ${reqQty} of ${invItem.product_name_snapshot}. Only ${invItem.remaining} ${invItem.unit_snapshot} left to return on invoice ${selectedReturnSale?.invoice_number}.`
+          );
+        }
+      }
 
       setBusy(true);
       const offlineResult = await createOfflineReturn({
-        saleId: returnForm.saleId,
-        items: [{ productId: returnForm.productId, quantity: qty }],
-        reason: returnForm.reason
+        saleId: returnSaleId,
+        items: validLines.map((line) => ({
+          productId: line.productId,
+          quantity: quantity(line.quantity)
+        })),
+        reason: returnReason
       });
 
       setReceipt({
         kind: 'RETURN',
         number: offlineResult.returnRow.return_number,
-        date: returnForm.date,
+        date: returnDate,
         reference: selectedReturnSale?.invoice_number,
+        customerName: selectedReturnSale?.customer_name || undefined,
+        customerPhone: selectedReturnSale?.customer_phone || undefined,
         totalLabel: 'REFUND TOTAL',
         total: offlineResult.returnRow.refund_total,
-        notes: `${returnForm.reason}${returnForm.restock ? '' : ' · Damaged / not added to stock'}`,
-        items: [{
-          name: selectedReturnItem?.product_name_snapshot || selectedProduct?.name || 'Returned item',
-          unit: selectedReturnItem?.unit_snapshot || selectedProduct?.unit || '',
-          quantity: qty,
-          rate: qty ? offlineResult.returnRow.refund_total / qty : 0,
-          amount: offlineResult.returnRow.refund_total,
-          note: returnForm.restock ? undefined : 'Damaged / not added to stock'
-        }]
+        notes: returnReason,
+        items: validLines.map((line) => {
+          const invItem = returnableInvoiceItems.find((it) => it.product_id === line.productId);
+          const reqQty = Number(line.quantity);
+          const rate = invItem ? invItem.unit_price : 0;
+          return {
+            name: invItem?.product_name_snapshot || 'Returned item',
+            unit: invItem?.unit_snapshot || '',
+            quantity: reqQty,
+            rate: rate,
+            amount: roundMoney(reqQty * rate)
+          };
+        })
       });
 
-      setReturnForm({
-        saleId: '',
-        productId: '',
-        quantity: '',
-        restock: true,
-        reason: 'Customer return',
-        date: today(),
-        refund: ''
-      });
+      setReturnSaleId('');
+      setReturnCart([{ productId: '', quantity: '1' }]);
+      setReturnReason('Customer return');
+      setReturnDate(today());
       setMessage(`Return ${offlineResult.returnRow.return_number} saved.`);
 
       await refreshFromOfflineDb();
@@ -1851,20 +1902,17 @@ export default function Home() {
               <section className="surface form-surface span-all">
                 <SectionHead title="Record a return" eyebrow="CUSTOMER REFUND" />
                 <form onSubmit={createReturn} className="form-stack">
-                  <Field label="Original sales bill (optional)">
+                  <Field label="Select invoice to return">
                     <select
-                      value={returnForm.saleId}
-                      onChange={(event) =>
-                        setReturnForm({
-                          ...returnForm,
-                          saleId: event.target.value,
-                          productId: '',
-                          quantity: '',
-                          refund: ''
-                        })
-                      }
+                      value={returnSaleId}
+                      onChange={(event) => {
+                        const newId = event.target.value;
+                        setReturnSaleId(newId);
+                        setReturnCart([{ productId: '', quantity: '1' }]);
+                      }}
+                      required
                     >
-                      <option value="">No original bill (Direct return)</option>
+                      <option value="">Choose original sales invoice...</option>
                       {returnSales.map((sale) => (
                         <option key={sale.id} value={sale.id}>
                           {sale.invoice_number} · {sale.sale_date} · {sale.customer_name ? `${sale.customer_name} · ` : ''}{formatMoney(sale.net_total)}
@@ -1872,131 +1920,276 @@ export default function Home() {
                       ))}
                     </select>
                   </Field>
-                  {returnForm.saleId ? (
-                    <Field label="Returned product">
-                      <select
-                        value={returnForm.productId}
-                        onChange={(event) =>
-                          setReturnForm({
-                            ...returnForm,
-                            productId: event.target.value,
-                            quantity: ''
-                          })
-                        }
-                      >
-                        <option value="">Choose invoice item</option>
-                        {selectedReturnSale?.items.map((item) => {
-                          const returnedQty = returns
-                            .filter(
-                              (row) =>
-                                row.sale_id === returnForm.saleId &&
-                                row.product_id === item.product_id
-                            )
-                            .reduce((sum, row) => sum + row.quantity, 0);
-                          const remaining = Math.max(0, item.quantity - returnedQty);
-                          return (
-                            <option
-                              key={item.product_id}
-                              value={item.product_id}
-                              disabled={!remaining}
-                            >
-                              {item.product_name_snapshot} · {formatQuantity(remaining)}{' '}
-                              {item.unit_snapshot} left
-                            </option>
-                          );
-                        })}
-                      </select>
-                    </Field>
-                  ) : (
+
+                  {selectedReturnSale ? (
                     <>
-                      <Field label="Product">
-                        <SearchableProductSelect
-                          products={products}
-                          value={returnForm.productId}
-                          onChange={(id) =>
-                            setReturnForm({ ...returnForm, productId: id })
-                          }
-                          placeholder="Search product for return..."
-                          required
-                        />
-                      </Field>
-                      <Field label="Refund amount (Rs.)">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={returnForm.refund}
-                          onChange={(event) =>
-                            setReturnForm({ ...returnForm, refund: event.target.value })
-                          }
-                          required
-                        />
-                      </Field>
-                    </>
-                  )}
-                  <div className="form-row">
-                    <Field label="Quantity">
-                      <input
-                        type="number"
-                        min="0.001"
-                        step="0.001"
-                        value={returnForm.quantity}
-                        onChange={(event) =>
-                          setReturnForm({ ...returnForm, quantity: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
-                    <Field label="Return date">
-                      <input
-                        type="date"
-                        value={returnForm.date}
-                        min={selectedReturnSale ? selectedReturnSale.sale_date : undefined}
-                        onChange={(event) =>
-                          setReturnForm({ ...returnForm, date: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
-                  </div>
-                  <Field label="Reason">
-                    <input
-                      value={returnForm.reason}
-                      onChange={(event) =>
-                        setReturnForm({ ...returnForm, reason: event.target.value })
-                      }
-                      required
-                    />
-                  </Field>
-                  <label className="check-field">
-                    <input
-                      type="checkbox"
-                      checked={returnForm.restock}
-                      onChange={(event) =>
-                        setReturnForm({ ...returnForm, restock: event.target.checked })
-                      }
-                    />
-                    <span>Saleable, add returned goods back to stock</span>
-                  </label>
-                  {selectedReturnItem && (
-                    <div className="refund-preview">
-                      <span>Estimated refund</span>
-                      <b>
-                        {formatMoney(
-                          lineAmount(
-                            Number(returnForm.quantity) || 0,
-                            selectedReturnItem.unit_price
-                          )
+                      <div
+                        style={{
+                          display: 'flex',
+                          flexWrap: 'wrap',
+                          gap: '16px',
+                          padding: '12px 16px',
+                          background: 'rgba(255, 255, 255, 0.03)',
+                          borderRadius: '8px',
+                          border: '1px solid var(--border, rgba(255, 255, 255, 0.08))',
+                          fontSize: '0.88rem'
+                        }}
+                      >
+                        <div>
+                          <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Invoice:</span>
+                          <b>{selectedReturnSale.invoice_number}</b>
+                        </div>
+                        <div>
+                          <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Date:</span>
+                          <b>{selectedReturnSale.sale_date}</b>
+                        </div>
+                        {selectedReturnSale.customer_name && (
+                          <div>
+                            <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Customer:</span>
+                            <b>{selectedReturnSale.customer_name} {selectedReturnSale.customer_phone ? `(${selectedReturnSale.customer_phone})` : ''}</b>
+                          </div>
                         )}
-                      </b>
-                      <small>
-                        Final partial return uses any remaining invoice rounding amount.
-                      </small>
+                        <div>
+                          <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Original Net Bill:</span>
+                          <b>{formatMoney(selectedReturnSale.net_total)}</b>
+                        </div>
+                      </div>
+
+                      <div className="pos-bill-table-wrap">
+                        <div className="pos-table-header">
+                          <span style={{ textAlign: 'center' }}>#</span>
+                          <span>Product</span>
+                          <span style={{ textAlign: 'center' }}>Returnable</span>
+                          <span style={{ textAlign: 'center' }}>Return Qty</span>
+                          <span>Rate (Rs.)</span>
+                          <span style={{ textAlign: 'right' }}>Refund (Rs.)</span>
+                          <span></span>
+                        </div>
+
+                        <div className="pos-bill-table">
+                          {returnCart.map((line, index) => {
+                            const invItem = returnableInvoiceItems.find((it) => it.product_id === line.productId);
+                            const qtyNum = Number(line.quantity) || 0;
+                            const isOverReturn = Boolean(invItem && qtyNum > invItem.remaining);
+                            const isFullyReturned = Boolean(invItem && invItem.remaining <= 0);
+                            const lineRefund = invItem ? lineAmount(qtyNum, invItem.unit_price) : 0;
+                            const otherSelectedIds = returnCart.filter((_, i) => i !== index).map((l) => l.productId);
+                            const availableForThisRow = invoiceProductsAsList.filter(
+                              (p) => !otherSelectedIds.includes(p.id) || p.id === line.productId
+                            );
+
+                            return (
+                              <div
+                                key={index}
+                                className={`pos-table-row ${isOverReturn || isFullyReturned ? 'oversell' : ''}`}
+                                style={{ zIndex: returnCart.length - index }}
+                              >
+                                <span className="pos-col-idx">{index + 1}</span>
+
+                                <div className="pos-col-prod">
+                                  <SearchableProductSelect
+                                    products={availableForThisRow}
+                                    value={line.productId}
+                                    placeholder="Search product from invoice..."
+                                    onChange={(newProductId) => {
+                                      setReturnCart(
+                                        returnCart.map((item, itemIndex) =>
+                                          itemIndex === index
+                                            ? { ...item, productId: newProductId, quantity: '1' }
+                                            : item
+                                        )
+                                      );
+                                    }}
+                                  />
+                                </div>
+
+                                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                                  {!invItem ? (
+                                    <span className="pos-stock-badge none">—</span>
+                                  ) : invItem.remaining <= 0 ? (
+                                    <span className="pos-stock-badge out">0 {invItem.unit_snapshot} left</span>
+                                  ) : (
+                                    <span className="pos-stock-badge ok">
+                                      ✓ {formatQuantity(invItem.remaining)} {invItem.unit_snapshot} left
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div>
+                                  <div className="pos-qty-group">
+                                    <button
+                                      type="button"
+                                      title="Decrease quantity"
+                                      disabled={qtyNum <= 1}
+                                      onClick={() => {
+                                        const next = Math.max(1, qtyNum - 1);
+                                        setReturnCart(
+                                          returnCart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(next) } : item
+                                          )
+                                        );
+                                      }}
+                                    >
+                                      −
+                                    </button>
+                                    <input
+                                      type="number"
+                                      min="0.001"
+                                      step="any"
+                                      value={line.quantity}
+                                      onChange={(event) =>
+                                        setReturnCart(
+                                          returnCart.map((item, itemIndex) =>
+                                            itemIndex === index
+                                              ? { ...item, quantity: event.target.value }
+                                              : item
+                                          )
+                                        )
+                                      }
+                                    />
+                                    <button
+                                      type="button"
+                                      title="Increase quantity"
+                                      disabled={invItem ? qtyNum >= invItem.remaining : false}
+                                      onClick={() => {
+                                        const next = qtyNum + 1;
+                                        setReturnCart(
+                                          returnCart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(next) } : item
+                                          )
+                                        );
+                                      }}
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <input
+                                    type="text"
+                                    readOnly
+                                    className="pos-price-input"
+                                    style={{
+                                      background: 'rgba(255, 255, 255, 0.05)',
+                                      color: 'var(--text-muted, #a1a1aa)',
+                                      cursor: 'not-allowed'
+                                    }}
+                                    value={invItem ? invItem.unit_price.toFixed(2) : '—'}
+                                    title="Original invoice selling price"
+                                  />
+                                </div>
+
+                                <div className="pos-total-cell">
+                                  {formatMoney(lineRefund)}
+                                </div>
+
+                                <div>
+                                  <button
+                                    type="button"
+                                    className="pos-del-btn"
+                                    title="Remove item"
+                                    disabled={returnCart.length === 1}
+                                    onClick={() =>
+                                      setReturnCart(returnCart.filter((_, itemIndex) => itemIndex !== index))
+                                    }
+                                  >
+                                    <X size={15} />
+                                  </button>
+                                </div>
+
+                                {isOverReturn && invItem && invItem.remaining > 0 && (
+                                  <div className="pos-row-warning">
+                                    <span>
+                                      ⛔ Exceeds invoice quantity! Only {formatQuantity(invItem.remaining)} {invItem.unit_snapshot} left to return on this bill.
+                                    </span>
+                                    <button
+                                      type="button"
+                                      className="quick-set-btn"
+                                      onClick={() =>
+                                        setReturnCart(
+                                          returnCart.map((item, i) =>
+                                            i === index ? { ...item, quantity: String(invItem.remaining) } : item
+                                          )
+                                        )
+                                      }
+                                    >
+                                      ⚡ Set to max ({formatQuantity(invItem.remaining)} {invItem.unit_snapshot})
+                                    </button>
+                                  </div>
+                                )}
+
+                                {isFullyReturned && invItem && (
+                                  <div className="pos-row-warning">
+                                    <span>
+                                      🚫 This item was already fully returned from invoice {selectedReturnSale.invoice_number}.
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className="text-button add-line"
+                          disabled={returnCart.length >= invoiceProductsAsList.length}
+                          onClick={() =>
+                            setReturnCart([...returnCart, { productId: '', quantity: '1' }])
+                          }
+                        >
+                          <Plus size={15} /> Add another invoice item
+                        </button>
+                      </div>
+
+                      <div className="bill-total">
+                        <span>Refund total</span>
+                        <strong>{formatMoney(returnTotal)}</strong>
+                      </div>
+
+                      <div className="form-row">
+                        <Field label="Return date">
+                          <input
+                            type="date"
+                            value={returnDate}
+                            min={selectedReturnSale ? selectedReturnSale.sale_date : undefined}
+                            onChange={(event) => setReturnDate(event.target.value)}
+                            required
+                          />
+                        </Field>
+                        <Field label="Reason">
+                          <input
+                            value={returnReason}
+                            placeholder="e.g. Defective, Wrong size, Customer requested"
+                            onChange={(event) => setReturnReason(event.target.value)}
+                            required
+                          />
+                        </Field>
+                      </div>
+
+                      <button className="button primary" disabled={busy || returnTotal <= 0}>
+                        <Undo2 size={16} /> Save & Print Return Receipt
+                      </button>
+                    </>
+                  ) : (
+                    <div
+                      style={{
+                        padding: '32px 20px',
+                        textAlign: 'center',
+                        background: 'rgba(255, 255, 255, 0.02)',
+                        borderRadius: '12px',
+                        border: '1px dashed var(--border, rgba(255, 255, 255, 0.1))',
+                        color: 'var(--text-muted, #a1a1aa)'
+                      }}
+                    >
+                      <p style={{ margin: 0, fontSize: '0.95rem' }}>
+                        Please select an original sales invoice above to load its products for return.
+                      </p>
                     </div>
                   )}
-                  <button className="button primary" disabled={busy}>
-                    <Undo2 size={16} /> Save return
-                  </button>
                 </form>
               </section>
               <section className="surface span-all">
