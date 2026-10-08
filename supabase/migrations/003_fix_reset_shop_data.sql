@@ -85,10 +85,9 @@ revoke all on function public.reset_shop_data(text) from public, anon;
 grant execute on function public.reset_shop_data(text) to authenticated;
 
 -- ==============================================================================
--- DEDUPLICATION ENHANCEMENT FOR CREATE_PRODUCT
--- If a product with the same name already exists for the owner, updates it and increments stock
--- instead of creating duplicate records. Supports p_id for seamless offline UUID sync.
--- ==============================================================================
+-- Drop older 7-parameter signature to prevent PostgREST PGRST203 overload ambiguity
+drop function if exists public.create_product(text, text, numeric, numeric, numeric, numeric, text);
+
 create or replace function public.create_product(
   p_name text,
   p_unit text,

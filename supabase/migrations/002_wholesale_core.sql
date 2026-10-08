@@ -877,6 +877,8 @@ begin
 end $$;
 
 -- E. CREATE PRODUCT
+drop function if exists public.create_product(text, text, numeric, numeric, numeric, numeric, text);
+
 create or replace function public.create_product(
   p_name text,
   p_unit text,
@@ -1046,7 +1048,7 @@ grant execute on function public.record_stock(uuid, numeric, numeric, date, text
 grant execute on function public.create_sale(date, jsonb, text, text, text) to authenticated;
 grant execute on function public.create_return(uuid, date, jsonb, text, text) to authenticated;
 grant execute on function public.adjust_stock(uuid, text, numeric, numeric, text, date, text) to authenticated;
-grant execute on function public.create_product(text, text, numeric, numeric, numeric, numeric, text) to authenticated;
+grant execute on function public.create_product(text, text, numeric, numeric, numeric, numeric, text, uuid) to authenticated;
 grant execute on function public.update_product(uuid, text, text, numeric, numeric, numeric, boolean, text) to authenticated;
 grant select on public.sale_item_balances to authenticated;
 grant select on public.sale_balances to authenticated;

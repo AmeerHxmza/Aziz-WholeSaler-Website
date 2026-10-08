@@ -488,10 +488,14 @@ export async function saveOfflineProduct(params: {
   id?: string;
   name: string;
   unit: string;
-  purchaseCost: number;
-  salePrice: number;
-  minimumStock: number;
+  purchaseCost?: number;
+  purchase_cost?: number;
+  salePrice?: number;
+  sale_price?: number;
+  minimumStock?: number;
+  minimum_stock?: number;
   openingStock?: number;
+  opening_stock?: number;
   active?: boolean;
 }): Promise<LocalProduct> {
   return await offlineDb.transaction(
@@ -504,7 +508,10 @@ export async function saveOfflineProduct(params: {
     async () => {
       const normalizedName = params.name.trim().toLowerCase();
       const operationId = crypto.randomUUID();
-      const openingStock = params.openingStock || 0;
+      const openingStock = Number(params.openingStock ?? params.opening_stock ?? 0);
+      const purchaseCost = Number(params.purchaseCost ?? params.purchase_cost ?? 0);
+      const salePrice = Number(params.salePrice ?? params.sale_price ?? 0);
+      const minimumStock = Number(params.minimumStock ?? params.minimum_stock ?? 10);
 
       // 1. Check if editing by ID or if a product with the same name already exists
       let existing: LocalProduct | undefined;
@@ -524,8 +531,8 @@ export async function saveOfflineProduct(params: {
         const newStock = roundMoney(currentStock + openingStock);
         const newAverage =
           newStock > 0 && openingStock > 0
-            ? roundMoney((currentStock * currentAvg + openingStock * params.purchaseCost) / newStock)
-            : (existing.average_cost || params.purchaseCost);
+            ? roundMoney((currentStock * currentAvg + openingStock * purchaseCost) / newStock)
+            : (existing.average_cost || purchaseCost);
 
         product = {
           ...existing,
@@ -533,9 +540,9 @@ export async function saveOfflineProduct(params: {
           unit: params.unit.trim(),
           current_stock: newStock,
           average_cost: newAverage,
-          purchase_cost: params.purchaseCost,
-          sale_price: params.salePrice,
-          minimum_stock: params.minimumStock,
+          purchase_cost: purchaseCost,
+          sale_price: salePrice,
+          minimum_stock: minimumStock,
           active: params.active ?? existing.active,
           updated_at: new Date().toISOString()
         };
@@ -547,7 +554,7 @@ export async function saveOfflineProduct(params: {
             product_id: product.id,
             movement_type: 'STOCK_IN',
             quantity_delta: openingStock,
-            unit_cost_snapshot: params.purchaseCost,
+            unit_cost_snapshot: purchaseCost,
             reference_type: 'STOCK_ENTRY',
             reference_id: product.id,
             notes: 'Stock added to existing product',
@@ -583,10 +590,10 @@ export async function saveOfflineProduct(params: {
           name: params.name.trim(),
           unit: params.unit.trim(),
           current_stock: openingStock,
-          average_cost: params.purchaseCost,
-          purchase_cost: params.purchaseCost,
-          sale_price: params.salePrice,
-          minimum_stock: params.minimumStock,
+          average_cost: purchaseCost,
+          purchase_cost: purchaseCost,
+          sale_price: salePrice,
+          minimum_stock: minimumStock,
           active: true,
           updated_at: new Date().toISOString()
         };
@@ -598,7 +605,7 @@ export async function saveOfflineProduct(params: {
             product_id: productId,
             movement_type: 'OPENING_STOCK',
             quantity_delta: openingStock,
-            unit_cost_snapshot: params.purchaseCost,
+            unit_cost_snapshot: purchaseCost,
             reference_type: 'INITIAL_PRODUCT',
             reference_id: productId,
             notes: 'Initial opening stock',
