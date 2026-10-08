@@ -239,7 +239,7 @@ export default function Home() {
   const [syncState, setSyncState] = useState<SyncStatusState>(syncEngine.getState());
   const [receipt, setReceipt] = useState<ReceiptRecord | null>(null);
   const [search, setSearch] = useState('');
-  const [productFilter, setProductFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'LOW_STOCK'>('ALL');
+  const [productFilter, setProductFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'LOW_STOCK' | 'OUT_OF_STOCK'>('ALL');
   const [reportStart, setReportStart] = useState(today());
   const [reportEnd, setReportEnd] = useState(today());
   const [cart, setCart] = useState<CartLine[]>([{ productId: '', quantity: '1', unitPrice: '' }]);
@@ -577,7 +577,8 @@ export default function Home() {
     if (!matchesSearch) return false;
     if (productFilter === 'ACTIVE') return product.active;
     if (productFilter === 'INACTIVE') return !product.active;
-    if (productFilter === 'LOW_STOCK') return product.active && product.stock <= product.minimum_stock;
+    if (productFilter === 'LOW_STOCK') return product.active && product.stock > 0 && product.stock <= product.minimum_stock;
+    if (productFilter === 'OUT_OF_STOCK') return product.stock <= 0;
     return true;
   });
   const returnSales = sales.filter((sale) => ['COMPLETED', 'PARTIALLY_RETURNED', 'CONFIRMED'].includes(sale.status));
@@ -1754,106 +1755,102 @@ export default function Home() {
             </div>
           )}
           {tab === 'products' && (
-            <div className="page-grid">
-              <section id="product-form" className="surface form-surface span-all">
-                <SectionHead title={editingProduct ? 'Edit product' : 'Add a product'} eyebrow="PRODUCT CATALOG" />
-                <form className="form-stack" onSubmit={createProduct}>
-                  <Field label="Product name">
-                    <input
-                      value={newProduct.name}
-                      onChange={(event) =>
-                        setNewProduct({ ...newProduct, name: event.target.value })
-                      }
-                      required
-                      maxLength={160}
-                    />
-                  </Field>
-                  <div className="form-row">
-                    <Field label="Selling unit">
-                      <input
-                        value={newProduct.unit}
-                        onChange={(event) =>
-                          setNewProduct({ ...newProduct, unit: event.target.value })
-                        }
-                        required
-                        maxLength={40}
-                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
-                        placeholder="e.g. Box"
-                      />
-                      <div className="unit-chips">
-                        {['Box', 'Piece', 'Kg', 'Carton', 'Packet', 'Bag', 'Dozen', 'Roll'].map((u) => (
-                          <button
-                            key={u}
-                            type="button"
-                            className={`unit-chip ${newProduct.unit.toLowerCase() === u.toLowerCase() ? 'active' : ''}`}
-                            onClick={() => setNewProduct({ ...newProduct, unit: u })}
-                            disabled={Boolean(editingProduct && editingProduct.stock > 0)}
-                          >
-                            {u}
-                          </button>
-                        ))}
-                      </div>
-                    </Field>
-                    <Field label="Minimum stock">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        value={newProduct.minimum_stock}
-                        onChange={(event) =>
-                          setNewProduct({ ...newProduct, minimum_stock: event.target.value })
-                        }
-                      />
-                    </Field>
+            <div className="product-workspace">
+              <div className="metric-grid">
+                <Metric
+                  label="Active products"
+                  value={`${products.filter((product) => product.active).length} of ${products.length}`}
+                  detail="Ready for sale on POS floor"
+                  icon={Boxes}
+                  tone="ink"
+                />
+                <Metric
+                  label="Stock valuation"
+                  value={formatMoney(stockValue)}
+                  detail="At current buying rates"
+                  icon={Coins}
+                  tone="green"
+                />
+                <Metric
+                  label="Low stock items"
+                  value={String(lowStock.length)}
+                  detail="At or below minimum threshold"
+                  icon={AlertTriangle}
+                  tone="gold"
+                />
+                <Metric
+                  label="Out of stock"
+                  value={String(products.filter((product) => product.stock <= 0).length)}
+                  detail="Zero inventory on shelf"
+                  icon={CircleAlert}
+                  tone="rust"
+                />
+              </div>
+
+              <section className="surface span-all">
+                <div className="section-head">
+                  <div>
+                    <p className="eyebrow">{products.length} PRODUCTS IN CATALOG</p>
+                    <h2>Product Catalog & Stock Matrix</h2>
                   </div>
-                  <div className="form-row">
-                    <Field label="Buying rate (Rs.)">
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <label className="search-field" style={{ minWidth: '220px' }}>
+                      <Search size={15} />
                       <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={newProduct.purchase_cost}
-                        onChange={(event) =>
-                          setNewProduct({ ...newProduct, purchase_cost: event.target.value })
-                        }
-                        required
-                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                        placeholder="Search product or unit..."
+                        value={search}
+                        onChange={(event) => setSearch(event.target.value)}
                       />
-                    </Field>
-                    <Field label="Selling rate (Rs.)">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={newProduct.sale_price}
-                        onChange={(event) =>
-                          setNewProduct({ ...newProduct, sale_price: event.target.value })
-                        }
-                        required
-                      />
-                    </Field>
+                      {search && (
+                        <button
+                          type="button"
+                          className="icon-button"
+                          style={{
+                            width: '24px',
+                            height: '24px',
+                            border: 'none',
+                            background: 'transparent',
+                            cursor: 'pointer'
+                          }}
+                          onClick={() => setSearch('')}
+                          title="Clear search"
+                        >
+                          <X size={13} />
+                        </button>
+                      )}
+                    </label>
+                    <select
+                      className="compact-select"
+                      aria-label="Filter products"
+                      value={productFilter}
+                      onChange={(event) => setProductFilter(event.target.value as typeof productFilter)}
+                    >
+                      <option value="ALL">All products ({products.length})</option>
+                      <option value="ACTIVE">Active ({products.filter((p) => p.active).length})</option>
+                      <option value="LOW_STOCK">Low stock ({lowStock.length})</option>
+                      <option value="OUT_OF_STOCK">Out of stock ({products.filter((p) => p.stock <= 0).length})</option>
+                      <option value="INACTIVE">Inactive ({products.filter((p) => !p.active).length})</option>
+                    </select>
                   </div>
-                  {!editingProduct && (
-                    <Field label="Starting shelf stock (optional - saves in 1 step)">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.001"
-                        placeholder="e.g. 50 (Instant stock on hand so you can sell right away)"
-                        value={newProduct.opening_stock}
-                        onChange={(event) => setNewProduct({ ...newProduct, opening_stock: event.target.value })}
-                      />
-                    </Field>
-                  )}
-                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-                    <button className="button primary" disabled={busy}>
-                      {editingProduct ? <Pencil size={16} /> : <Plus size={16} />}
-                      {editingProduct ? 'Save changes' : 'Save product'}
-                    </button>
+                </div>
+
+                <div id="product-form" className={`product-quick-form ${editingProduct ? 'editing' : ''}`}>
+                  <div className="product-form-header">
+                    <span className="product-form-title">
+                      {editingProduct ? (
+                        <>
+                          <Pencil size={15} /> Edit Product: <b>{editingProduct.name}</b>
+                        </>
+                      ) : (
+                        <>
+                          <Plus size={15} /> Quick Add Product to Catalog
+                        </>
+                      )}
+                    </span>
                     {editingProduct && (
                       <button
-                        className="button secondary"
                         type="button"
+                        className="button secondary compact-btn"
                         onClick={() => {
                           setEditingProduct(null);
                           setNewProduct({
@@ -1866,34 +1863,114 @@ export default function Home() {
                           });
                         }}
                       >
-                        Cancel edit
+                        <X size={13} /> Cancel edit
                       </button>
                     )}
                   </div>
-                </form>
-              </section>
-              <section className="surface span-all">
-                <div className="section-head">
-                  <div>
-                    <p className="eyebrow">{products.length} PRODUCTS</p>
-                    <h2>Product list</h2>
-                  </div>
-                  <label className="search-field">
-                    <Search size={15} />
-                    <input
-                      placeholder="Find a product"
-                      value={search}
-                      onChange={(event) => setSearch(event.target.value)}
-                    />
-                  </label>
-                  <select className="compact-select" aria-label="Filter products" value={productFilter} onChange={(event) => setProductFilter(event.target.value as typeof productFilter)}>
-                    <option value="ALL">All products</option>
-                    <option value="ACTIVE">Active</option>
-                    <option value="INACTIVE">Inactive</option>
-                    <option value="LOW_STOCK">Low stock</option>
-                  </select>
+                  <form onSubmit={createProduct} className="product-form-grid">
+                    <Field label="Product name">
+                      <input
+                        value={newProduct.name}
+                        placeholder="e.g. Basmati Rice 25kg"
+                        onChange={(event) => setNewProduct({ ...newProduct, name: event.target.value })}
+                        required
+                        maxLength={160}
+                      />
+                    </Field>
+                    <Field label="Unit">
+                      <input
+                        list="unit-suggestions"
+                        value={newProduct.unit}
+                        placeholder="e.g. Box"
+                        onChange={(event) => setNewProduct({ ...newProduct, unit: event.target.value })}
+                        required
+                        maxLength={40}
+                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                      />
+                      <datalist id="unit-suggestions">
+                        <option value="Box" />
+                        <option value="Piece" />
+                        <option value="Kg" />
+                        <option value="Carton" />
+                        <option value="Packet" />
+                        <option value="Bag" />
+                        <option value="Dozen" />
+                        <option value="Roll" />
+                        <option value="Liter" />
+                      </datalist>
+                    </Field>
+                    <Field label="Buying rate (Rs.)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={newProduct.purchase_cost}
+                        onChange={(event) => setNewProduct({ ...newProduct, purchase_cost: event.target.value })}
+                        required
+                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                      />
+                    </Field>
+                    <Field label="Selling rate (Rs.)">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={newProduct.sale_price}
+                        onChange={(event) => setNewProduct({ ...newProduct, sale_price: event.target.value })}
+                        required
+                      />
+                    </Field>
+                    <Field label="Min. stock">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        placeholder="10"
+                        value={newProduct.minimum_stock}
+                        onChange={(event) => setNewProduct({ ...newProduct, minimum_stock: event.target.value })}
+                      />
+                    </Field>
+                    {!editingProduct ? (
+                      <Field label="Initial stock">
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.001"
+                          placeholder="0 (Optional)"
+                          value={newProduct.opening_stock}
+                          onChange={(event) => setNewProduct({ ...newProduct, opening_stock: event.target.value })}
+                        />
+                      </Field>
+                    ) : (
+                      <Field label="Current stock">
+                        <input
+                          type="text"
+                          readOnly
+                          disabled
+                          value={`${formatQuantity(editingProduct.stock)} ${editingProduct.unit}`}
+                          style={{ background: 'rgba(0,0,0,0.03)', cursor: 'not-allowed' }}
+                        />
+                      </Field>
+                    )}
+                    <button
+                      className="button primary"
+                      disabled={busy}
+                      style={{ height: '38px', whiteSpace: 'nowrap' }}
+                    >
+                      {editingProduct ? <Pencil size={15} /> : <Plus size={15} />}
+                      {editingProduct ? 'Save changes' : 'Add product'}
+                    </button>
+                  </form>
                 </div>
-                <ProductsTable products={visibleProducts} onEdit={beginEditProduct} onToggleActive={toggleProductActive} onQuickStock={openQuickStock} />
+
+                <ProductsTable
+                  products={visibleProducts}
+                  onEdit={beginEditProduct}
+                  onToggleActive={toggleProductActive}
+                  onQuickStock={openQuickStock}
+                />
               </section>
             </div>
           )}
@@ -2993,70 +3070,104 @@ function ProductsTable({
       <table>
         <thead>
           <tr>
+            <th style={{ width: '38px', textAlign: 'center' }}>#</th>
             <th>Product</th>
             <th>Unit</th>
-            <th className="align-right">In stock</th>
-            <th className="align-right">Buying rate</th>
-            <th className="align-right">Selling rate</th>
-            <th>Stock status</th>
-            {(onEdit || onToggleActive || onQuickStock) && <th>Actions</th>}
+            <th style={{ textAlign: 'center' }}>Shelf Stock</th>
+            <th className="align-right">Buying Rate</th>
+            <th className="align-right">Selling Rate</th>
+            <th className="align-right">Wholesale Margin</th>
+            <th style={{ textAlign: 'center' }}>Status</th>
+            {(onEdit || onToggleActive || onQuickStock) && <th style={{ textAlign: 'right' }}>Actions</th>}
           </tr>
         </thead>
         <tbody>
-          {products.map((product) => {
+          {products.map((product, index) => {
             const state =
               product.stock <= 0 ? 'OUT' : product.stock <= product.minimum_stock ? 'LOW' : 'OK';
+            const margin = product.sale_price - product.purchase_cost;
+            const marginPct =
+              product.purchase_cost > 0
+                ? ((margin / product.purchase_cost) * 100).toFixed(0)
+                : '0';
+
             return (
-              <tr key={product.id}>
+              <tr key={product.id} style={{ opacity: product.active ? 1 : 0.65 }}>
+                <td style={{ textAlign: 'center', color: '#8a968d', fontWeight: 700, fontSize: '11px' }}>
+                  {index + 1}
+                </td>
                 <td>
                   <b>{product.name}</b>
-                  {!product.active && <small>Inactive</small>}
+                  {!product.active && <small style={{ color: 'var(--rust)' }}>Inactive (Hidden from POS)</small>}
                 </td>
-                <td>{product.unit}</td>
-                <td className="align-right numeric">{formatQuantity(product.stock)}</td>
-                <td className="align-right numeric">{formatMoney(product.purchase_cost)}</td>
-                <td className="align-right numeric">{formatMoney(product.sale_price)}</td>
                 <td>
+                  <span style={{ fontWeight: 600 }}>{product.unit}</span>
+                </td>
+                <td style={{ textAlign: 'center' }}>
                   <span
-                    className={`pill ${state === 'OK' ? 'pill-green' : state === 'LOW' ? 'pill-gold' : 'pill-rust'}`}
+                    className={`pos-stock-badge ${
+                      state === 'OK' ? 'ok' : state === 'LOW' ? 'low' : 'out'
+                    }`}
                   >
-                    {state === 'OK' ? 'In range' : state === 'LOW' ? 'Low stock' : 'Out of stock'}
+                    {state === 'OK' ? (
+                      `✓ ${formatQuantity(product.stock)}`
+                    ) : state === 'LOW' ? (
+                      `⚠ ${formatQuantity(product.stock)} (Low)`
+                    ) : (
+                      '⛔ 0 (Out)'
+                    )}
+                  </span>
+                </td>
+                <td className="align-right numeric">{formatMoney(product.purchase_cost)}</td>
+                <td className="align-right numeric">
+                  <b>{formatMoney(product.sale_price)}</b>
+                </td>
+                <td className="align-right numeric">
+                  <span className={`margin-chip ${margin < 0 ? 'negative' : ''}`}>
+                    {margin >= 0 ? '+' : ''}{formatMoney(margin)} ({marginPct}%)
+                  </span>
+                </td>
+                <td style={{ textAlign: 'center' }}>
+                  <span className={`pill ${product.active ? 'pill-green' : 'pill-rust'}`}>
+                    {product.active ? 'Active' : 'Inactive'}
                   </span>
                 </td>
                 {(onEdit || onToggleActive || onQuickStock) && (
-                  <td className="product-actions">
-                    {onQuickStock && (
-                      <button
-                        className="button secondary compact-btn"
-                        type="button"
-                        title={`Add Stock to ${product.name}`}
-                        onClick={() => onQuickStock(product)}
-                      >
-                        <PackagePlus size={13} /> + Stock
-                      </button>
-                    )}
-                    {onEdit && (
-                      <button
-                        className="icon-button"
-                        type="button"
-                        title={`Edit ${product.name}`}
-                        aria-label={`Edit ${product.name}`}
-                        onClick={() => onEdit(product)}
-                      >
-                        <Pencil size={15} />
-                      </button>
-                    )}
-                    {onToggleActive && (
-                      <button
-                        className="icon-button"
-                        type="button"
-                        title={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
-                        aria-label={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
-                        onClick={() => onToggleActive(product)}
-                      >
-                        <Power size={15} />
-                      </button>
-                    )}
+                  <td>
+                    <div className="product-actions">
+                      {onQuickStock && (
+                        <button
+                          className="button secondary compact-btn"
+                          type="button"
+                          title={`Quick Restock ${product.name}`}
+                          onClick={() => onQuickStock(product)}
+                        >
+                          <PackagePlus size={13} /> + Stock
+                        </button>
+                      )}
+                      {onEdit && (
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title={`Edit ${product.name}`}
+                          aria-label={`Edit ${product.name}`}
+                          onClick={() => onEdit(product)}
+                        >
+                          <Pencil size={15} />
+                        </button>
+                      )}
+                      {onToggleActive && (
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
+                          aria-label={product.active ? `Deactivate ${product.name}` : `Activate ${product.name}`}
+                          onClick={() => onToggleActive(product)}
+                        >
+                          <Power size={15} />
+                        </button>
+                      )}
+                    </div>
                   </td>
                 )}
               </tr>

@@ -860,4 +860,98 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
-}
+}
+
+/* Professional Product Catalog Matrix & Form */
+.product-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+
+.product-quick-form {
+  background: #ffffff;
+  border: 1px solid #dcdfd9;
+  border-radius: 6px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  transition: all 0.2s ease;
+}
+
+.product-quick-form.editing {
+  background: #fffdf5;
+  border-color: #fde68a;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.15);
+}
+
+.product-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #f1f3ef;
+  padding-bottom: 8px;
+}
+
+.product-form-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #2e3a32;
+}
+
+.product-form-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 2.5fr) minmax(130px, 1.1fr) minmax(110px, 1fr) minmax(110px, 1fr) minmax(105px, 0.9fr) minmax(110px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+@media (max-width: 1280px) {
+  .product-form-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+}
+
+.margin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 650;
+  background: #ecfdf5;
+  color: #065f46;
+  border: 1px solid #a7f3d0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.margin-chip.negative {
+  background: #fef2f2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+.product-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.product-actions .compact-btn {
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11px;
+  gap: 4px;
+}
+
