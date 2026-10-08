@@ -81,6 +81,7 @@ type Sale = {
   sale_date: string;
   customer_name?: string | null;
   customer_phone?: string | null;
+  total?: number;
   net_total: number;
   original_profit?: number;
   status: string;
@@ -140,6 +141,24 @@ const today = () => {
   const date = new Date();
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 };
+
+const getDaysAgo = (days: number) => {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+const startOfMonth = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-01`;
+};
+
+const startOfYear = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-01-01`;
+};
+
+type OverviewPeriod = 'TODAY' | 'WEEK' | 'MONTH' | 'YEAR' | 'ALL';
 const defaultSettings = {
   business_name: 'Aziz & Son Wholesaler',
   address: '',
@@ -238,6 +257,7 @@ export default function Home() {
   const [error, setError] = useState('');
   const [syncState, setSyncState] = useState<SyncStatusState>(syncEngine.getState());
   const [receipt, setReceipt] = useState<ReceiptRecord | null>(null);
+  const [overviewPeriod, setOverviewPeriod] = useState<OverviewPeriod>('TODAY');
   const [search, setSearch] = useState('');
   const [productFilter, setProductFilter] = useState<'ALL' | 'ACTIVE' | 'INACTIVE' | 'LOW_STOCK' | 'OUT_OF_STOCK'>('ALL');
   const [reportStart, setReportStart] = useState(today());
@@ -634,22 +654,50 @@ export default function Home() {
     return refund - cost;
   };
 
-  const todaySales = sales.filter((sale) => {
+  const periodRange = (() => {
+    const end = today();
+    if (overviewPeriod === 'TODAY') return { start: end, end, label: 'Today' };
+    if (overviewPeriod === 'WEEK') return { start: getDaysAgo(7), end, label: 'Last 7 Days' };
+    if (overviewPeriod === 'MONTH') return { start: startOfMonth(), end, label: 'This Month' };
+    if (overviewPeriod === 'YEAR') return { start: startOfYear(), end, label: 'This Year' };
+    return { start: '', end: '', label: 'All-Time History' };
+  })();
+
+  const periodSales = sales.filter((sale) => {
+    if (sale.status === 'VOIDED') return false;
     const d = sale.sale_date || sale.created_at?.slice(0, 10);
-    return d === today() && sale.status !== 'VOIDED';
+    if (!d) return false;
+    if (overviewPeriod === 'ALL') return true;
+    return d >= periodRange.start && d <= periodRange.end;
   });
-  const todayRefunds = returns.filter((row) => {
-    const d = row.movement_date || (row as unknown as { return_date?: string }).return_date || (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
-    return d === today();
+
+  const periodReturns = returns.filter((row) => {
+    const d =
+      row.movement_date ||
+      (row as unknown as { return_date?: string }).return_date ||
+      (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
+    if (!d) return false;
+    if (overviewPeriod === 'ALL') return true;
+    return d >= periodRange.start && d <= periodRange.end;
   });
-  const todayNetSales = roundMoney(
-    todaySales.reduce((sum, sale) => sum + Number(sale.net_total), 0) -
-      todayRefunds.reduce((sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0), 0)
+
+  const periodGrossSales = roundMoney(
+    periodSales.reduce((sum, sale) => sum + Number(sale.total ?? sale.net_total), 0)
   );
-  const todayProfit = roundMoney(
-    todaySales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
-      todayRefunds.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
+  const periodRefunds = roundMoney(
+    periodReturns.reduce(
+      (sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0),
+      0
+    )
   );
+  const periodNetSales = roundMoney(Math.max(0, periodGrossSales - periodRefunds));
+  const periodProfit = roundMoney(
+    periodSales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
+      periodReturns.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
+  );
+  const periodMarginPct =
+    periodNetSales > 0 ? ((periodProfit / periodNetSales) * 100).toFixed(1) : '0';
+  const periodCogs = roundMoney(Math.max(0, periodNetSales - periodProfit));
   const stockValue = roundMoney(
     products.reduce((sum, product) => sum + Math.max(0, product.stock) * product.purchase_cost, 0)
   );
@@ -1389,25 +1437,72 @@ export default function Home() {
           )}
           {tab === 'overview' && (
             <>
+              <div className="overview-period-bar">
+                <div className="period-pills">
+                  <button
+                    type="button"
+                    className={`period-pill ${overviewPeriod === 'TODAY' ? 'active' : ''}`}
+                    onClick={() => setOverviewPeriod('TODAY')}
+                  >
+                    Today
+                  </button>
+                  <button
+                    type="button"
+                    className={`period-pill ${overviewPeriod === 'WEEK' ? 'active' : ''}`}
+                    onClick={() => setOverviewPeriod('WEEK')}
+                  >
+                    This Week (7 Days)
+                  </button>
+                  <button
+                    type="button"
+                    className={`period-pill ${overviewPeriod === 'MONTH' ? 'active' : ''}`}
+                    onClick={() => setOverviewPeriod('MONTH')}
+                  >
+                    This Month
+                  </button>
+                  <button
+                    type="button"
+                    className={`period-pill ${overviewPeriod === 'YEAR' ? 'active' : ''}`}
+                    onClick={() => setOverviewPeriod('YEAR')}
+                  >
+                    This Year ({new Date().getFullYear()})
+                  </button>
+                  <button
+                    type="button"
+                    className={`period-pill ${overviewPeriod === 'ALL' ? 'active' : ''}`}
+                    onClick={() => setOverviewPeriod('ALL')}
+                  >
+                    All-Time History
+                  </button>
+                </div>
+                <span className="period-date-range">
+                  {overviewPeriod === 'TODAY' && `📅 Today · ${today()}`}
+                  {overviewPeriod === 'WEEK' && `📅 Last 7 days · ${periodRange.start} to ${periodRange.end}`}
+                  {overviewPeriod === 'MONTH' && `📅 Month to date · ${periodRange.start} to ${periodRange.end}`}
+                  {overviewPeriod === 'YEAR' && `📅 Year ${new Date().getFullYear()} · ${periodRange.start} to ${periodRange.end}`}
+                  {overviewPeriod === 'ALL' && `📅 Full Wholesaler History (All Recorded Bills)`}
+                </span>
+              </div>
+
               <div className="metric-grid">
                 <Metric
-                  label="Net sales today"
-                  value={formatMoney(todayNetSales)}
-                  detail={`${todaySales.length} saved ${todaySales.length === 1 ? 'bill' : 'bills'}`}
+                  label={`Net sales (${periodRange.label})`}
+                  value={formatMoney(periodNetSales)}
+                  detail={`${periodSales.length} saved ${periodSales.length === 1 ? 'bill' : 'bills'}`}
                   icon={ShoppingCart}
                   tone="green"
                 />
                 <Metric
-                  label="Customer refunds"
-                  value={formatMoney(todayRefunds.reduce((sum, row) => sum + row.refund_amount, 0))}
-                  detail={`${todayRefunds.length} return lines today`}
+                  label={`Customer refunds (${periodRange.label})`}
+                  value={formatMoney(periodRefunds)}
+                  detail={`${periodReturns.length} return ${periodReturns.length === 1 ? 'line' : 'lines'}`}
                   icon={Undo2}
                   tone="rust"
                 />
                 <Metric
-                  label="Trading profit"
-                  value={formatMoney(todayProfit)}
-                  detail="After refunds, before expenses"
+                  label={`Trading profit (${periodRange.label})`}
+                  value={formatMoney(periodProfit)}
+                  detail={`${periodMarginPct}% net trading margin`}
                   icon={ChartNoAxesCombined}
                   tone="gold"
                 />
@@ -1418,6 +1513,37 @@ export default function Home() {
                   icon={Boxes}
                   tone="ink"
                 />
+              </div>
+
+              <div className="wholesale-summary-strip">
+                <div className="wholesale-stat-block">
+                  <span>Gross Sales</span>
+                  <strong>{formatMoney(periodGrossSales)}</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Refunds</span>
+                  <strong className="refund">−{formatMoney(periodRefunds)}</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Net Revenue</span>
+                  <strong>{formatMoney(periodNetSales)}</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Goods Cost (COGS)</span>
+                  <strong>{formatMoney(periodCogs)}</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Net Trading Profit</span>
+                  <strong className="profit">+{formatMoney(periodProfit)}</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Trading Margin</span>
+                  <strong className="profit">{periodMarginPct}%</strong>
+                </div>
+                <div className="wholesale-stat-block">
+                  <span>Bills Count</span>
+                  <strong>{periodSales.length}</strong>
+                </div>
               </div>
               <div className="overview-grid">
                 <section className="surface span-all">
@@ -2496,6 +2622,58 @@ export default function Home() {
                   <h2>Reports</h2>
                 </div>
                 <div className="report-filters">
+                  <div className="period-pills" style={{ marginRight: '6px' }}>
+                    <button
+                      type="button"
+                      className="period-pill"
+                      onClick={() => {
+                        setReportStart(today());
+                        setReportEnd(today());
+                      }}
+                    >
+                      Today
+                    </button>
+                    <button
+                      type="button"
+                      className="period-pill"
+                      onClick={() => {
+                        setReportStart(getDaysAgo(7));
+                        setReportEnd(today());
+                      }}
+                    >
+                      7 Days
+                    </button>
+                    <button
+                      type="button"
+                      className="period-pill"
+                      onClick={() => {
+                        setReportStart(startOfMonth());
+                        setReportEnd(today());
+                      }}
+                    >
+                      This Month
+                    </button>
+                    <button
+                      type="button"
+                      className="period-pill"
+                      onClick={() => {
+                        setReportStart(startOfYear());
+                        setReportEnd(today());
+                      }}
+                    >
+                      This Year
+                    </button>
+                    <button
+                      type="button"
+                      className="period-pill"
+                      onClick={() => {
+                        setReportStart('2020-01-01');
+                        setReportEnd(today());
+                      }}
+                    >
+                      All Time
+                    </button>
+                  </div>
                   <Field label="From">
                     <input
                       type="date"
