@@ -1494,7 +1494,7 @@ export default function Home() {
           )}
           {tab === 'sales' && (
             <div className="page-grid">
-              <section className="surface form-surface">
+              <section className="surface form-surface span-all">
                 <SectionHead title="Write a sales bill" eyebrow="NEW TRANSACTION" />
                 <p className="section-copy">
                   Prices and cost are recorded in the bill when it is saved. Stock is verified in real-time.
@@ -1752,23 +1752,6 @@ export default function Home() {
                   );
                 })()}
               </section>
-              <aside className="surface help-surface">
-                <p className="eyebrow">BILLING NOTES</p>
-                <h3>Keep the sale true to the shelf.</h3>
-                <p>
-                  One product per bill line. The database validates available stock at save time, so
-                  another open session cannot silently oversell it.
-                </p>
-                <div className="help-rule" />
-                <p>
-                  Saved lines keep product name, unit, sale rate and buying cost snapshots. Future
-                  price changes will not rewrite past profit.
-                </p>
-                <div className="inline-stat">
-                  <span>Sellable items now</span>
-                  <b>{activeProducts.filter((item) => item.stock > 0).length}</b>
-                </div>
-              </aside>
               <section className="surface span-all">
                 <SectionHead title="Sales book" eyebrow="LATEST 300 BILLS" />
                 <SalesTable sales={sales} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
@@ -2781,6 +2764,7 @@ function SalesTable({
           <tr>
             <th>Invoice</th>
             <th>Date</th>
+            <th>Customer</th>
             <th>Items</th>
             <th>Status</th>
             <th className="align-right">Net bill</th>
@@ -2824,6 +2808,14 @@ function SalesTable({
                   <b className="invoice-number">{sale.invoice_number}</b>
                 </td>
                 <td>{sale.sale_date}</td>
+                <td>
+                  <b>{sale.customer_name || 'Walk-in'}</b>
+                  {sale.customer_phone && (
+                    <small style={{ display: 'block', color: '#666', fontSize: '11px' }}>
+                      {sale.customer_phone}
+                    </small>
+                  )}
+                </td>
                 <td>
                   {sale.items.length} {sale.items.length === 1 ? 'line' : 'lines'}
                   <small>
@@ -3032,13 +3024,13 @@ function ReceiptPreview({
         <article className="receipt-paper" id="receipt-paper">
           <header className="receipt-heading">
             <strong>{settings.business_name}</strong>
-            <b>{receipt.kind === 'RETURN' ? 'RETURN BILL' : 'SALE BILL'}</b>
+            <b style={{ fontSize: '15px', letterSpacing: '2px', display: 'block', margin: '3px 0' }}>{receipt.kind === 'RETURN' ? 'RETURN' : 'SALE'}</b>
           </header>
           {receipt.kind === 'RETURN' && <div className="receipt-rule" />}
           <div className="receipt-meta"><b>Bill:</b><span>{receipt.number}</span></div>
           <div className="receipt-meta"><b>Date:</b><span>{receipt.date}</span></div>
-          {receipt.customerName && <div className="receipt-meta"><b>Customer:</b><span>{receipt.customerName}</span></div>}
-          {receipt.customerPhone && <div className="receipt-meta"><b>Mobile:</b><span>{receipt.customerPhone}</span></div>}
+          <div className="receipt-meta"><b>Customer:</b><span>{receipt.customerName || 'Walk-in'}</span></div>
+          <div className="receipt-meta"><b>Mobile:</b><span>{receipt.customerPhone || '—'}</span></div>
           {receipt.reference && <div className="receipt-meta"><b>Original:</b><span>{receipt.reference}</span></div>}
           <div className="receipt-rule" />
           <div className="receipt-grid receipt-grid-head"><b>Item</b><b>Qty</b><b>Rate</b><b>Amount</b></div>

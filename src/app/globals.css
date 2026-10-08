@@ -168,6 +168,7 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 4px; 
 .rule-list span { padding: 10px 0; border-bottom: 1px solid #e6e8e2; color: #536056; font-size: 10px; }
 .rule-list span::before { margin-right: 9px; color: #9e7946; content: "—"; }
 .span-all { grid-column: 1 / -1; overflow: hidden; }
+.form-surface.span-all { overflow: visible !important; }
 .section-head .search-field { width: 220px; }
 .search-field { display: flex; align-items: center; gap: 7px; padding-left: 9px; border: 1px solid #dfe4dd; background: white; color: #909890; }
 .search-field input { height: 32px; padding-left: 0; border: 0; box-shadow: none !important; }

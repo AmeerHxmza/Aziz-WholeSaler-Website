@@ -173,7 +173,7 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
                 Tel: {[settings.phone1, settings.phone2].filter(Boolean).join(' / ')}
               </p>
             )}
-            <div style={{ margin: '1.5mm 0', fontSize: '10.5px', fontWeight: 'bold' }}>SALE RECEIPT</div>
+            <div style={{ margin: '1.5mm 0', fontSize: '11.5px', fontWeight: 'bold', letterSpacing: '2px' }}>SALE</div>
           </div>
 
           <div style={{ borderTop: '1px dashed #000', margin: '1.5mm 0' }} />
@@ -184,12 +184,10 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
               <span>Invoice: <b>{sale.invoice_number}</b></span>
               <span>Date: {sale.sale_date}</span>
             </div>
-            {(sale.customer_name || sale.customer_phone) && (
-              <div style={{ marginTop: '0.8mm', paddingTop: '0.6mm', borderTop: '1px dotted #ccc', fontSize: '8.5px' }}>
-                {sale.customer_name && <div>Customer: <b>{sale.customer_name}</b></div>}
-                {sale.customer_phone && <div>Mobile: <b>{sale.customer_phone}</b></div>}
-              </div>
-            )}
+            <div style={{ marginTop: '0.8mm', paddingTop: '0.6mm', borderTop: '1px dotted #ccc', fontSize: '8.5px' }}>
+              <div>Customer: <b>{sale.customer_name || 'Walk-in'}</b></div>
+              <div>Mobile: <b>{sale.customer_phone || '—'}</b></div>
+            </div>
           </div>
 
           <div style={{ borderTop: '1px solid #000', margin: '1mm 0' }} />

@@ -173,7 +173,7 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
                 Tel: {[settings.phone1, settings.phone2].filter(Boolean).join(' / ')}
               </p>
             )}
-            <div style={{ margin: '1.5mm 0', fontSize: '10.5px', fontWeight: 'bold' }}>RETURN RECEIPT</div>
+            <div style={{ margin: '1.5mm 0', fontSize: '11.5px', fontWeight: 'bold', letterSpacing: '2px' }}>RETURN</div>
           </div>
 
           <div style={{ borderTop: '1px dashed #000', margin: '1.5mm 0' }} />
@@ -187,6 +187,10 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
             {ret.invoice_number && (
               <div style={{ marginTop: '0.5mm' }}>Original Invoice: <b>{ret.invoice_number}</b></div>
             )}
+            <div style={{ marginTop: '0.8mm', paddingTop: '0.6mm', borderTop: '1px dotted #ccc', fontSize: '8.5px' }}>
+              <div>Customer: <b>{ret.customer_name || 'Walk-in'}</b></div>
+              <div>Mobile: <b>{ret.customer_phone || '—'}</b></div>
+            </div>
             {ret.reason && (
               <div style={{ marginTop: '0.5mm', color: '#555' }}>Reason: {ret.reason}</div>
             )}

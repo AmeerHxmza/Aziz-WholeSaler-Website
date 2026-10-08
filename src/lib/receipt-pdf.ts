@@ -81,14 +81,14 @@ export function createReceiptPdf(document: ReceiptPdfDocument, settings: Receipt
   // 1. Header (Centered at CENTER_X = 40mm)
   addText(settings.business_name || 'Aziz & Son Wholesaler', CENTER_X, CONTENT_WIDTH, 11, true, 'center');
   y += 0.8;
-  addText(document.kind === 'RETURN' ? 'RETURN BILL' : 'SALE BILL', CENTER_X, CONTENT_WIDTH, 9, true, 'center');
+  addText(document.kind === 'RETURN' ? 'RETURN' : 'SALE', CENTER_X, CONTENT_WIDTH, 11, true, 'center');
   y += 1.5;
 
   // 2. Metadata (Left aligned at CONTENT_LEFT = 5mm)
   addText(`Bill: ${document.number}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
   addText(`Date: ${document.date}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
-  if (document.customerName) addText(`Customer: ${document.customerName}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, true);
-  if (document.customerPhone) addText(`Mobile: ${document.customerPhone}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, true);
+  addText(`Customer: ${document.customerName || 'Walk-in'}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, true);
+  addText(`Mobile: ${document.customerPhone || '—'}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2, Boolean(document.customerPhone));
   if (document.reference) addText(`Original: ${document.reference}`, CONTENT_LEFT, CONTENT_WIDTH, 8.2);
 
   // 3. Table Header
