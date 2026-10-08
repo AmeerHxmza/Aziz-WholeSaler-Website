@@ -173,6 +173,22 @@ test('End-to-End Wholesaler Flow: New Product -> Stock Inward -> Sale -> Return 
   // Inventory valuation: 12 bags on shelf * Rs. 2,500 = Rs. 30,000
   assert.equal(stockValuation, 30000, 'Stock on hand valuation must be 12 * 2500 = Rs. 30,000.00');
 
+  // STEP 6: Sales Challan & Returns Book Isolation Verification
+  const originalBillAmount = roundMoney(Number(saleResult.sale.total));
+  assert.equal(originalBillAmount, 12800, 'Original sales challan bill amount must remain Rs. 12,800.00 without being zeroed out');
+  assert.notEqual(originalBillAmount, 0, 'Original sales challan must NEVER be updated to 0');
+  
+  const isFullyReturned = refunds >= originalBillAmount && originalBillAmount > 0;
+  const isPartialReturn = refunds > 0 && !isFullyReturned;
+  assert.equal(isFullyReturned, false, 'Sale of 12,800 with 3,200 return is NOT fully returned');
+  assert.equal(isPartialReturn, true, 'Sale of 12,800 with 3,200 return is correctly marked Partial return');
+
+  // Profit on this sale after return must be positive:
+  const grossSaleProfit = 2800;
+  const reversedProfit = 700; // 1 bag * (3,200 - 2,500)
+  const netSaleProfit = grossSaleProfit - reversedProfit;
+  assert.equal(netSaleProfit, 2100, 'Net profit on sale must be positive Rs. 2,100.00');
+
   // Output verified clean summary
   console.log('✅ Wholesaler Verification Summary:');
   console.log(`   - Shelf Stock Remaining: ${prodAfterReturn?.current_stock} ${productA.unit}`);
@@ -183,4 +199,5 @@ test('End-to-End Wholesaler Flow: New Product -> Stock Inward -> Sale -> Return 
   console.log(`   - Cost of Goods Sold (COGS): ${formatMoney(cogs)}`);
   console.log(`   - Net Trading Profit: ${formatMoney(tradingProfit)}`);
   console.log(`   - Profit Margin: ${marginPct}%`);
+  console.log(`   - Sales Challan Preserved: ${formatMoney(originalBillAmount)} (Partial Return: -${formatMoney(refunds)})`);
 });

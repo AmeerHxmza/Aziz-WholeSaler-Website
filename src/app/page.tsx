@@ -100,6 +100,7 @@ type ReturnRow = {
   quantity: number;
   refund_amount: number;
   cost_amount_snapshot: number;
+  profit_reversed: number;
   restock: boolean;
   reason: string;
   movement_date: string;
@@ -183,8 +184,8 @@ function saleReceipt(sale: Sale): ReceiptRecord {
     date: sale.sale_date,
     customerName: sale.customer_name,
     customerPhone: sale.customer_phone,
-    totalLabel: 'TOTAL',
-    total: sale.net_total,
+    totalLabel: 'BILL TOTAL',
+    total: Number(sale.total ?? sale.net_total),
     items: sale.items.map((item) => ({
       name: item.product_name_snapshot,
       unit: item.unit_snapshot,
@@ -431,20 +432,57 @@ export default function Home() {
 
       setReturns(
         localReturns.map((r) => {
-          const rItem = localReturnItems.find((ri) => ri.return_id === r.id);
-          const prod = localProducts.find((p) => p.id === rItem?.product_id);
+          const rItems = localReturnItems.filter((ri) => ri.return_id === r.id);
+          const firstItem = rItems[0];
+          const prod = localProducts.find((p) => p.id === (firstItem?.product_id || (r as any).product_id));
           const sale = localSales.find((s) => s.id === r.sale_id);
+          const saleItemsForSale = localSaleItems.filter((si) => si.sale_id === r.sale_id);
+          const matchedSaleItem = saleItemsForSale.find(
+            (si) => si.product_id === (firstItem?.product_id || (r as any).product_id)
+          );
+
+          const refundTot = Number(r.refund_total || 0);
+
+          let returnedCost = 0;
+          if (rItems.length > 0) {
+            returnedCost = rItems.reduce((sum, ri) => {
+              const unitCost = Number(ri.unit_cost_snapshot || 0);
+              return sum + unitCost * Number(ri.quantity_returned || 0);
+            }, 0);
+          }
+
+          if (returnedCost === 0) {
+            const unitCost = Number(
+              matchedSaleItem?.unit_cost_snapshot ||
+                prod?.average_cost ||
+                prod?.purchase_cost ||
+                0
+            );
+            const qty = Number(firstItem?.quantity_returned || (r as any).quantity || 1);
+            if (unitCost > 0) {
+              returnedCost = roundMoney(unitCost * qty);
+            }
+          }
+
+          let profitRev = Number(r.profit_reversed || 0);
+          if (profitRev === 0 && returnedCost > 0 && refundTot >= returnedCost) {
+            profitRev = roundMoney(refundTot - returnedCost);
+          } else if (profitRev > 0 && returnedCost === 0 && refundTot >= profitRev) {
+            returnedCost = roundMoney(refundTot - profitRev);
+          }
+
           return {
             id: r.id,
             bill_number: r.return_number,
             sale_id: r.sale_id,
             invoice_number: r.invoice_number || sale?.invoice_number || null,
-            product_id: rItem?.product_id || '',
-            product_name_snapshot: prod?.name || 'Returned item',
-            unit_snapshot: prod?.unit || 'Units',
-            quantity: Number(rItem?.quantity_returned || 0),
-            refund_amount: Number(r.refund_total),
-            cost_amount_snapshot: Number(rItem ? (rItem.unit_cost_snapshot || 0) * rItem.quantity_returned : 0),
+            product_id: firstItem?.product_id || (r as any).product_id || '',
+            product_name_snapshot: prod?.name || (r as any).product_name_snapshot || 'Returned item',
+            unit_snapshot: prod?.unit || (r as any).unit_snapshot || 'Units',
+            quantity: Number(firstItem?.quantity_returned || (r as any).quantity || 0),
+            refund_amount: refundTot,
+            cost_amount_snapshot: roundMoney(returnedCost),
+            profit_reversed: roundMoney(profitRev),
             restock: true,
             reason: r.reason || 'Customer return',
             movement_date: r.return_date
@@ -643,18 +681,55 @@ export default function Home() {
   }, 0);
   const getSaleProfit = (s: Sale): number => {
     if (s.items && s.items.length > 0) {
-      return s.items.reduce(
-        (sum, item) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
-        0
+      return roundMoney(
+        s.items.reduce(
+          (sum, item) =>
+            sum +
+            (Number(item.line_total) -
+              Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
+          0
+        )
       );
     }
     return Number((s as any).original_profit || 0);
   };
 
+  const getSaleCost = (s: Sale): number => {
+    if (s.items && s.items.length > 0) {
+      return roundMoney(
+        s.items.reduce(
+          (sum, item) =>
+            sum +
+            Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0),
+          0
+        )
+      );
+    }
+    const prof = Number((s as any).original_profit || 0);
+    return Math.max(0, roundMoney(Number(s.total ?? s.net_total) - prof));
+  };
+
   const getReturnProfitReduction = (row: ReturnRow): number => {
+    if (typeof row.profit_reversed === 'number' && row.profit_reversed > 0) {
+      return row.profit_reversed;
+    }
     const refund = Number(row.refund_amount ?? (row as any).refund_total ?? 0);
     const cost = row.restock ? Number(row.cost_amount_snapshot || 0) : 0;
-    return refund - cost;
+    if (cost > 0 && refund >= cost) {
+      return roundMoney(refund - cost);
+    }
+    return 0;
+  };
+
+  const getReturnCostRestocked = (row: ReturnRow): number => {
+    if (!row.restock) return 0;
+    if (row.cost_amount_snapshot > 0) return row.cost_amount_snapshot;
+    const refund = Number(row.refund_amount ?? (row as any).refund_total ?? 0);
+    const profitRev = Number(row.profit_reversed || 0);
+    if (refund > profitRev && profitRev > 0) {
+      return roundMoney(refund - profitRev);
+    }
+    return 0;
   };
 
   const periodRange = (() => {
@@ -694,13 +769,17 @@ export default function Home() {
     )
   );
   const periodNetSales = roundMoney(Math.max(0, periodGrossSales - periodRefunds));
-  const periodProfit = roundMoney(
-    periodSales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
-      periodReturns.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
+  const periodGrossCogs = roundMoney(
+    periodSales.reduce((sum, sale) => sum + getSaleCost(sale), 0)
   );
+  const periodReturnedCost = roundMoney(
+    periodReturns.reduce((sum, row) => sum + getReturnCostRestocked(row), 0)
+  );
+  const periodCogs = roundMoney(Math.max(0, periodGrossCogs - periodReturnedCost));
+  const periodProfit = roundMoney(periodNetSales - periodCogs);
   const periodMarginPct =
     periodNetSales > 0 ? ((periodProfit / periodNetSales) * 100).toFixed(1) : '0';
-  const periodCogs = roundMoney(Math.max(0, periodNetSales - periodProfit));
+
   const stockValue = roundMoney(
     products.reduce((sum, product) => sum + Math.max(0, product.stock) * product.purchase_cost, 0)
   );
@@ -715,14 +794,23 @@ export default function Home() {
     const d = row.movement_date || (row as unknown as { return_date?: string }).return_date || (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
     return d && d >= reportStart && d <= reportEnd;
   });
-  const reportNet = roundMoney(
-    reportSales.reduce((sum, sale) => sum + Number(sale.net_total), 0) -
-      reportReturns.reduce((sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0), 0)
+  const reportGrossSales = roundMoney(
+    reportSales.reduce((sum, sale) => sum + Number(sale.total ?? sale.net_total), 0)
   );
-  const reportProfit = roundMoney(
-    reportSales.reduce((sum, sale) => sum + getSaleProfit(sale), 0) -
-      reportReturns.reduce((sum, row) => sum + getReturnProfitReduction(row), 0)
+  const reportRefunds = roundMoney(
+    reportReturns.reduce(
+      (sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0),
+      0
+    )
   );
+  const reportNet = roundMoney(Math.max(0, reportGrossSales - reportRefunds));
+  const reportGrossCogs = roundMoney(
+    reportSales.reduce((sum, sale) => sum + getSaleCost(sale), 0)
+  );
+  const reportReturnedCost = roundMoney(
+    reportReturns.reduce((sum, row) => sum + getReturnCostRestocked(row), 0)
+  );
+  const reportProfit = roundMoney(reportNet - Math.max(0, reportGrossCogs - reportReturnedCost));
   const outstandingIn = roundMoney(
     loans
       .filter((loan) => loan.type === 'GIVEN')
@@ -1205,19 +1293,18 @@ export default function Home() {
   function exportReport() {
     if (reportStart > reportEnd) return;
     const saleRows = reportSales.map((sale) => {
-      const saleRefunds = returns
-        .filter((r) => r.sale_id === sale.id)
-        .reduce((sum, r) => sum + r.refund_amount, 0);
-      const netBill = Math.max(0, sale.net_total - saleRefunds);
-      const saleProfit = sale.items.reduce(
-        (sum, item) => sum + item.line_total - item.cost_total_snapshot,
-        0
-      );
+      const saleReturns = returns.filter((r) => r.sale_id === sale.id);
+      const saleRefunds = saleReturns.reduce((sum, r) => sum + r.refund_amount, 0);
+      const billTotal = Number(sale.total ?? sale.net_total);
+      const netBill = Math.max(0, billTotal - saleRefunds);
+      const grossProfit = getSaleProfit(sale);
+      const reversedProfit = saleReturns.reduce((sum, r) => sum + getReturnProfitReduction(r), 0);
+      const saleProfit = grossProfit - reversedProfit;
       return [
         sale.invoice_number,
         sale.sale_date,
         String(sale.items.length),
-        sale.net_total.toFixed(2),
+        billTotal.toFixed(2),
         saleRefunds.toFixed(2),
         netBill.toFixed(2),
         saleProfit.toFixed(2),
@@ -1537,11 +1624,13 @@ export default function Home() {
                 </div>
                 <div className="wholesale-stat-block">
                   <span>Net Trading Profit</span>
-                  <strong className="profit">+{formatMoney(periodProfit)}</strong>
+                  <strong className={periodProfit >= 0 ? 'profit' : 'refund'}>
+                    {periodProfit >= 0 ? `+${formatMoney(periodProfit)}` : `−${formatMoney(Math.abs(periodProfit))}`}
+                  </strong>
                 </div>
                 <div className="wholesale-stat-block">
                   <span>Trading Margin</span>
-                  <strong className="profit">{periodMarginPct}%</strong>
+                  <strong className={periodProfit >= 0 ? 'profit' : 'refund'}>{periodMarginPct}%</strong>
                 </div>
                 <div className="wholesale-stat-block">
                   <span>Bills Count</span>
@@ -2121,7 +2210,7 @@ export default function Home() {
                       <option value="">Choose original sales invoice...</option>
                       {returnSales.map((sale) => (
                         <option key={sale.id} value={sale.id}>
-                          {sale.invoice_number} · {sale.sale_date} · {sale.customer_name ? `${sale.customer_name} · ` : ''}{formatMoney(sale.net_total)}
+                          {sale.invoice_number} · {sale.sale_date} · {sale.customer_name ? `${sale.customer_name} · ` : ''}{formatMoney(sale.total ?? sale.net_total)}
                         </option>
                       ))}
                     </select>
@@ -2156,8 +2245,8 @@ export default function Home() {
                           </div>
                         )}
                         <div>
-                          <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Original Net Bill:</span>
-                          <b>{formatMoney(selectedReturnSale.net_total)}</b>
+                          <span style={{ color: 'var(--text-muted, #a1a1aa)', marginRight: '6px' }}>Original Bill:</span>
+                          <b>{formatMoney(selectedReturnSale.total ?? selectedReturnSale.net_total)}</b>
                         </div>
                       </div>
 
@@ -3139,16 +3228,19 @@ function SalesTable({
             <th>Customer</th>
             <th>Items</th>
             <th>Status</th>
-            <th className="align-right">Net bill</th>
+            <th className="align-right">Bill amount</th>
             <th className="print-column">Receipt</th>
           </tr>
         </thead>
         <tbody>
           {sales.map((sale) => {
             const saleReturns = returns.filter((r) => r.sale_id === sale.id);
-            const refundedAmount = saleReturns.reduce((sum, r) => sum + r.refund_amount, 0);
-            const netBill = roundMoney(Math.max(0, sale.net_total - refundedAmount));
-            const isFullyReturned = refundedAmount >= sale.net_total && sale.net_total > 0;
+            const refundedAmount = roundMoney(
+              saleReturns.reduce((sum, r) => sum + Number(r.refund_amount || 0), 0)
+            );
+            const billTotal = roundMoney(Number(sale.total ?? sale.net_total));
+            const remainingNet = roundMoney(Math.max(0, billTotal - refundedAmount));
+            const isFullyReturned = refundedAmount >= billTotal && billTotal > 0;
             const isPartialReturn = refundedAmount > 0 && !isFullyReturned;
             const statusLabel =
               sale.status === 'VOIDED'
@@ -3167,12 +3259,30 @@ function SalesTable({
                     ? 'pill-gold'
                     : 'pill-green';
 
-            const saleProfit = roundMoney(
-              (sale.items && sale.items.length > 0
-                ? sale.items.reduce((sum, item) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)), 0)
-                : Number(sale.original_profit || 0)) -
-              saleReturns.reduce((sum, r) => sum + (r.refund_amount - (r.restock ? (r.cost_amount_snapshot || 0) : 0)), 0)
+            const grossProfit = roundMoney(
+              sale.items && sale.items.length > 0
+                ? sale.items.reduce(
+                    (sum, item) =>
+                      sum +
+                      (Number(item.line_total) -
+                        Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
+                    0
+                  )
+                : Number((sale as any).original_profit || 0)
             );
+            const reversedProfit = roundMoney(
+              saleReturns.reduce(
+                (sum, r) =>
+                  sum +
+                  (typeof r.profit_reversed === 'number' && r.profit_reversed > 0
+                    ? r.profit_reversed
+                    : r.restock && r.cost_amount_snapshot > 0 && r.refund_amount >= r.cost_amount_snapshot
+                      ? r.refund_amount - r.cost_amount_snapshot
+                      : 0),
+                0
+              )
+            );
+            const saleProfit = roundMoney(grossProfit - reversedProfit);
 
             return (
               <tr key={sale.id}>
@@ -3201,14 +3311,14 @@ function SalesTable({
                   <span className={`pill ${statusClass}`}>{statusLabel}</span>
                 </td>
                 <td className="align-right numeric">
-                  <b>{formatMoney(netBill)}</b>
+                  <b>{formatMoney(billTotal)}</b>
                   {refundedAmount > 0 && (
                     <small style={{ color: 'var(--rust)', display: 'block', fontSize: '10px' }}>
-                      −{formatMoney(refundedAmount)} returned
+                      −{formatMoney(refundedAmount)} returned {isPartialReturn ? `(Net: ${formatMoney(remainingNet)})` : ''}
                     </small>
                   )}
                   <small style={{ color: saleProfit >= 0 ? '#10b981' : '#ef4444', display: 'block', fontSize: '10px', marginTop: '2px' }}>
-                    Profit: {formatMoney(saleProfit)}
+                    Profit: {saleProfit >= 0 ? '+' : ''}{formatMoney(saleProfit)}
                   </small>
                 </td>
                 <td className="print-column">
