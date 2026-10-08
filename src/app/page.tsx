@@ -536,6 +536,9 @@ export default function Home() {
           localStorage.removeItem('aziz_pos_trusted_device');
           await supabase.auth.signOut();
           setError(claimError.message);
+        } else {
+          setSession({ id: result.data.user.id, email: result.data.user.email });
+          setAccountEmail(result.data.user.email || '');
         }
       }
     } catch (cause) {

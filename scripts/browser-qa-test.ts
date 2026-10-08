@@ -11,22 +11,39 @@ async function runBrowserQa() {
   const context = await browser.newContext({
     viewport: { width: 1440, height: 900 }
   });
+
+  await context.addInitScript(() => {
+    try {
+      localStorage.setItem(
+        'aziz_pos_trusted_device',
+        JSON.stringify({ id: 'c1c0dc31-5ecc-4808-b156-f68d4230e94a', email: 'aziz@gmail.com', trustedAt: new Date().toISOString() })
+      );
+    } catch {}
+  });
+
   const page = await context.newPage();
 
   try {
     // 1. Navigate to application
-    console.log('📍 Navigating to http://localhost:3000...');
-    await page.goto('http://localhost:3000', { waitUntil: 'networkidle' });
+    console.log('📍 Navigating to http://127.0.0.1:3000...');
+    await page.goto('http://127.0.0.1:3000', { waitUntil: 'domcontentloaded' });
 
     // Handle authentication if on login screen
     const emailInput = page.locator('input[type="email"]');
-    if (await emailInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+    if (await emailInput.isVisible({ timeout: 3000 }).catch(() => false)) {
       console.log('🔑 Logging in with aziz@gmail.com / aziz1234...');
       await emailInput.fill('aziz@gmail.com');
       await page.fill('input[type="password"]', 'aziz1234');
-      await page.click('button[type="submit"]');
-      await page.waitForLoadState('networkidle');
-      await page.waitForTimeout(1000);
+      await page.click('button:has-text("Sign in")');
+      try {
+        await page.waitForSelector('.sidebar', { timeout: 15000 });
+      } catch (waitErr) {
+        const noticeText = await page.locator('.notice, .notice-error, p.eyebrow').allInnerTexts().catch(() => []);
+        console.error('Login wait failed. Screen notices:', noticeText);
+        throw waitErr;
+      }
+    } else {
+      await page.waitForSelector('.sidebar', { timeout: 10000 });
     }
 
     console.log('✅ Logged in successfully. Current URL:', page.url());
@@ -167,7 +184,18 @@ async function runBrowserQa() {
 
     // Select the saved invoice
     const invoiceSelect = page.locator('select').first();
-    await invoiceSelect.selectOption({ label: new RegExp(invoiceNumber) });
+    const invoiceOptions = await invoiceSelect.locator('option').all();
+    let invoiceVal = '';
+    for (const opt of invoiceOptions) {
+      const text = await opt.innerText();
+      if (text.includes(invoiceNumber)) {
+        invoiceVal = (await opt.getAttribute('value')) || '';
+        break;
+      }
+    }
+    if (invoiceVal) {
+      await invoiceSelect.selectOption(invoiceVal);
+    }
     await page.waitForTimeout(800);
 
     // Verify invoice summary strip

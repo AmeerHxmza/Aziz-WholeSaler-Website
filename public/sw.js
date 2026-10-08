@@ -1,5 +1,4 @@
-// Aziz & Son Wholesale - Resilient Service Worker
-const CACHE_NAME = 'aziz-pos-v2';
+const CACHE_NAME = 'aziz-pos-v3';
 const STATIC_ASSETS = [
   '/',
   '/manifest.webmanifest',
