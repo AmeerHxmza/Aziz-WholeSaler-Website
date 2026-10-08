@@ -179,7 +179,7 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
   flex-direction: column;
   gap: 8px;
   margin: 14px 0;
-  overflow-x: auto;
+  overflow: visible !important;
 }
 
 .pos-table-header {
@@ -201,9 +201,11 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow: visible !important;
 }
 
 .pos-table-row {
+  position: relative;
   display: grid;
   grid-template-columns: 36px minmax(280px, 2.6fr) minmax(110px, 0.9fr) minmax(135px, 1fr) minmax(115px, 0.9fr) minmax(130px, 1fr) 36px;
   gap: 12px;
@@ -213,11 +215,16 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
   border-radius: 6px;
   align-items: center;
   transition: all 0.15s ease;
+  overflow: visible !important;
 }
 
 .pos-table-row:hover {
   border-color: #cbd5cb;
   background: #fafbfa;
+}
+
+.pos-table-row:focus-within {
+  z-index: 50 !important;
 }
 
 .pos-table-row.oversell {
@@ -233,7 +240,9 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
 }
 
 .pos-col-prod {
+  position: relative;
   min-width: 0;
+  overflow: visible !important;
 }
 
 .pos-stock-badge {

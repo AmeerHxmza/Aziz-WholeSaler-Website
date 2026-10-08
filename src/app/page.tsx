@@ -1476,6 +1476,7 @@ export default function Home() {
                               <div
                                 key={index}
                                 className={`pos-table-row ${isOverselling || isOutOfStock ? 'oversell' : ''}`}
+                                style={{ zIndex: cart.length - index }}
                               >
                                 <span className="pos-col-idx">{index + 1}</span>
 

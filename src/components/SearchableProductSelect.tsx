@@ -125,7 +125,7 @@ export function SearchableProductSelect({
     <div
       ref={containerRef}
       className="searchable-select-container"
-      style={{ position: 'relative', width: '100%' }}
+      style={{ position: 'relative', width: '100%', zIndex: isOpen ? 9999 : 'auto' }}
       onKeyDown={handleKeyDown}
     >
       {/* Trigger Button */}
