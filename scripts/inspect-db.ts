@@ -1,16 +1,17 @@
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://ttexfcxvyefbfilmyiwc.supabase.co';
-const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'sb_publishable_w-re86Xu23u08fKdJaD9Ig_A2zCvC6Z';
+const SUPABASE_URL = process.env.TEST_SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.TEST_SUPABASE_ANON_KEY || '';
 
 async function main() {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !process.env.TEST_ADMIN_EMAIL || !process.env.TEST_ADMIN_PASSWORD) throw new Error('Explicit TEST_SUPABASE_URL, TEST_SUPABASE_ANON_KEY, TEST_ADMIN_EMAIL and TEST_ADMIN_PASSWORD are required.');
   const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
     auth: { persistSession: false }
   });
 
   const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
-    email: 'aziz@gmail.com',
-    password: '123456'
+    email: process.env.TEST_ADMIN_EMAIL,
+    password: process.env.TEST_ADMIN_PASSWORD || ''
   });
 
   if (authError) {

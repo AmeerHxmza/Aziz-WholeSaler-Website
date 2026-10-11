@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { offlineDb } from '@/lib/db/offline-db';
+import { type LocalSale, type LocalSaleItem, offlineDb } from '@/lib/db/offline-db';
 import { formatMoney, formatQuantity } from '@/lib/calculations';
 import { Printer, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
@@ -12,8 +12,8 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
   const supabase = getSupabase();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [sale, setSale] = useState<any>(null);
-  const [items, setItems] = useState<any[]>([]);
+  const [sale, setSale] = useState<LocalSale | null>(null);
+  const [items, setItems] = useState<(LocalSaleItem & { unit_price?: number })[]>([]);
   const [settings, setSettings] = useState({
     business_name: 'Aziz & Son Wholesaler',
     address: '',
@@ -25,6 +25,9 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
   useEffect(() => {
     async function fetchReceipt() {
       try {
+        if (!localStorage.getItem('aziz_pos_trusted_device')) throw new Error('Sign in to view receipts.');
+        const cachedSettings = await offlineDb.settings.get('cloud_settings');
+        if (cachedSettings?.value) setSettings(current => ({ ...current, ...cachedSettings.value as typeof current }));
         // 1. Try local IndexedDB first (works 100% offline!)
         const localSale = await offlineDb.sales.get(id);
         if (localSale) {
@@ -58,8 +61,8 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
             receipt_footer: settingsRes.data.receipt_footer || 'Thank you for your business!'
           });
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load receipt.');
+      } catch (err: unknown) {
+        setError((err instanceof Error ? err.message : '') || 'Failed to load receipt.');
       } finally {
         setLoading(false);
       }
@@ -212,7 +215,7 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
                     {formatQuantity(item.quantity)} {item.unit_snapshot}
                   </td>
                   <td style={{ padding: '1.2mm 0', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {formatQuantity(item.unit_sale_price || item.unit_price)}
+                    {formatQuantity(item.unit_sale_price ?? item.unit_price ?? 0)}
                   </td>
                   <td style={{ padding: '1.2mm 0', textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 'bold' }}>
                     {formatQuantity(item.line_total)}
@@ -226,7 +229,7 @@ export default function SaleReceiptPage({ params }: { params: Promise<{ id: stri
           <div style={{ borderTop: '2px solid #000', marginTop: '2mm', paddingTop: '1.5mm' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 'bold' }}>
               <span>TOTAL</span>
-              <span>{formatMoney(sale.total || sale.net_total)}</span>
+              <span>{formatMoney(sale.total ?? sale.net_total)}</span>
             </div>
           </div>
           <div style={{ borderBottom: '2px solid #000', marginTop: '1.5mm', marginBottom: '2.5mm' }} />

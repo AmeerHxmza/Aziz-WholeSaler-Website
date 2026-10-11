@@ -65,6 +65,9 @@ export interface LocalReturnItem {
   unit_cost_snapshot: number;
   refund_amount: number;
   profit_reversed: number;
+  restock?: boolean;
+  product_name_snapshot?: string;
+  unit_snapshot?: string;
 }
 
 export interface LocalStockEntry {
@@ -100,11 +103,12 @@ export interface LocalInventoryMovement {
 }
 
 export interface LocalSyncQueueItem {
+  sequence?: number;
   id: string;
   operation_id: string;
-  operation_type: 'CREATE_SALE' | 'CREATE_RETURN' | 'RECORD_STOCK' | 'CREATE_PRODUCT' | 'UPDATE_PRODUCT';
+  operation_type: 'CREATE_SALE' | 'CREATE_RETURN' | 'RECORD_STOCK' | 'CREATE_PRODUCT' | 'UPDATE_PRODUCT' | 'ADJUST_STOCK' | 'CREATE_LOAN' | 'SETTLE_LOAN' | 'SAVE_SETTINGS';
   entity_id: string;
-  payload: any;
+  payload: Record<string, unknown>;
   status: 'PENDING' | 'SYNCING' | 'SYNCED' | 'FAILED' | 'CONFLICT';
   attempt_count: number;
   last_attempt_at: string | null;
@@ -114,7 +118,7 @@ export interface LocalSyncQueueItem {
 
 export interface LocalSetting {
   key: string;
-  value: any;
+  value: unknown;
 }
 
 export class AzizOfflineDatabase extends Dexie {

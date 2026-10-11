@@ -14,8 +14,9 @@ import {
 test('money is rounded symmetrically to paisa', () => {
   assert.equal(roundMoney(10.005), 10.01);
   assert.equal(roundMoney(-10.005), -10.01);
-  assert.equal(amount('10.25'), 10.25);
-  assert.throws(() => amount('10.251'), /2 decimal places/);
+  assert.equal(amount('10'), 10);
+  assert.throws(() => amount('10.25'), /whole number/);
+  assert.throws(() => amount('10.251'), /whole number/);
 });
 
 test('line amounts preserve the supported half-paisa rule', () => {
@@ -26,10 +27,11 @@ test('line amounts preserve the supported half-paisa rule', () => {
 });
 
 test('quantity precision and boundaries match the desktop rules', () => {
-  assert.equal(quantity('1.250'), 1.25);
+  assert.equal(quantity('125'), 125);
+  assert.throws(() => quantity('1.25'), /whole number/);
   assert.equal(roundQuantity(1.23456), 1.235);
   assert.throws(() => quantity('0'), /valid quantity/);
-  assert.throws(() => quantity('0.0001'), /3 decimal places/);
+  assert.throws(() => quantity('0.0001'), /whole number/);
   assert.equal(quantity('0', true), 0);
 });
 

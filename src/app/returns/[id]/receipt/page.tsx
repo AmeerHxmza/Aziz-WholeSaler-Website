@@ -2,7 +2,7 @@
 
 import { use, useEffect, useState } from 'react';
 import { getSupabase } from '@/lib/supabase';
-import { offlineDb } from '@/lib/db/offline-db';
+import { type LocalReturn, type LocalReturnItem, offlineDb } from '@/lib/db/offline-db';
 import { formatMoney, formatQuantity } from '@/lib/calculations';
 import { Printer, ArrowLeft } from 'lucide-react';
 import Link from 'next/link';
@@ -12,8 +12,8 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
   const supabase = getSupabase();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [ret, setRet] = useState<any>(null);
-  const [items, setItems] = useState<any[]>([]);
+  const [ret, setRet] = useState<(LocalReturn & { bill_number?: string; movement_date?: string; customer_name?: string; customer_phone?: string; refund_amount?: number }) | null>(null);
+  const [items, setItems] = useState<(LocalReturnItem & { products?: { name: string; unit: string }; quantity?: number; unit_sale_price?: number; unit_price?: number })[]>([]);
   const [settings, setSettings] = useState({
     business_name: 'Aziz & Son Wholesaler',
     address: '',
@@ -25,12 +25,17 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
   useEffect(() => {
     async function fetchReceipt() {
       try {
+        if (!localStorage.getItem('aziz_pos_trusted_device')) throw new Error('Sign in to view receipts.');
+        const cachedSettings = await offlineDb.settings.get('cloud_settings');
+        if (cachedSettings?.value) setSettings(current => ({ ...current, ...cachedSettings.value as typeof current }));
         // 1. Try local IndexedDB first
         const localRet = await offlineDb.returns.get(id);
         if (localRet) {
           const localItems = await offlineDb.return_items.where('return_id').equals(id).toArray();
-          setRet(localRet);
-          setItems(localItems);
+          const originalSale = await offlineDb.sales.get(localRet.sale_id);
+          const originalItems = await offlineDb.sale_items.where('sale_id').equals(localRet.sale_id).toArray();
+          setRet({ ...localRet, customer_name: originalSale?.customer_name || '', customer_phone: originalSale?.customer_phone || '' });
+          setItems(localItems.map(item => ({ ...item, product_name_snapshot: item.product_name_snapshot || originalItems.find(si => si.id === item.sale_item_id)?.product_name_snapshot, unit_snapshot: item.unit_snapshot || originalItems.find(si => si.id === item.sale_item_id)?.unit_snapshot })));
           setLoading(false);
           return;
         }
@@ -58,8 +63,8 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
             receipt_footer: settingsRes.data.receipt_footer || 'Thank you for your business!'
           });
         }
-      } catch (err: any) {
-        setError(err.message || 'Failed to load return receipt.');
+      } catch (err: unknown) {
+        setError((err instanceof Error ? err.message : '') || 'Failed to load return receipt.');
       } finally {
         setLoading(false);
       }
@@ -215,10 +220,10 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
                     {item.products?.name || item.product_name_snapshot || 'Returned Item'}
                   </td>
                   <td style={{ padding: '1.2mm 0', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {formatQuantity(item.quantity_returned || item.quantity)} {item.products?.unit || item.unit_snapshot || ''}
+                    {formatQuantity(item.quantity_returned ?? item.quantity ?? 0)} {item.products?.unit || item.unit_snapshot || ''}
                   </td>
                   <td style={{ padding: '1.2mm 0', textAlign: 'right', whiteSpace: 'nowrap' }}>
-                    {formatQuantity(item.unit_sale_price_snapshot || item.unit_sale_price || item.unit_price)}
+                    {formatQuantity(item.unit_sale_price_snapshot ?? item.unit_sale_price ?? item.unit_price ?? 0)}
                   </td>
                   <td style={{ padding: '1.2mm 0', textAlign: 'right', whiteSpace: 'nowrap', fontWeight: 'bold' }}>
                     {formatQuantity(item.refund_amount)}
@@ -232,7 +237,7 @@ export default function ReturnReceiptPage({ params }: { params: Promise<{ id: st
           <div style={{ borderTop: '2px solid #000', marginTop: '2mm', paddingTop: '1.5mm' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', fontWeight: 'bold' }}>
               <span>REFUND TOTAL</span>
-              <span>{formatMoney(ret.refund_total || ret.refund_amount)}</span>
+              <span>{formatMoney(ret.refund_total ?? ret.refund_amount ?? 0)}</span>
             </div>
           </div>
           <div style={{ borderBottom: '2px solid #000', marginTop: '1.5mm', marginBottom: '2.5mm' }} />

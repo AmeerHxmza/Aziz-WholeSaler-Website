@@ -1,3 +1,4 @@
+import { enqueueOperation } from './queue';
 import {
   offlineDb,
   type LocalProduct,
@@ -9,7 +10,7 @@ import {
   type LocalInventoryMovement,
   type LocalSyncQueueItem
 } from './offline-db';
-import { roundMoney, lineAmount } from '../calculations';
+import { roundMoney, lineAmount, amount, quantity, averageCost, businessDate } from '../calculations';
 
 function todayString(): string {
   const date = new Date();
@@ -24,8 +25,10 @@ async function getNextSequence(key: 'sale' | 'return' | 'stock'): Promise<string
   const next = current + 1;
   await offlineDb.settings.put({ key: settingKey, value: next });
 
+  let device = await offlineDb.settings.get('device_id');
+  if (!device) { device = { key: 'device_id', value: crypto.randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase() }; await offlineDb.settings.put(device); }
   const prefix = key === 'sale' ? 'AS' : key === 'return' ? 'RT' : 'SE';
-  return `${prefix}-${String(next).padStart(6, '0')}`;
+  return `${prefix}-${device.value}-${String(next).padStart(6, '0')}`;
 }
 
 export async function setSequenceFloor(key: 'sale' | 'return' | 'stock', floor: number): Promise<void> {
@@ -67,8 +70,11 @@ export async function createOfflineSale(params: {
       const saleItemsToInsert: LocalSaleItem[] = [];
       const movementsToInsert: LocalInventoryMovement[] = [];
 
+      if (!params.items.length) throw new Error('Add at least one item.');
+      if (new Set(params.items.map(i => i.productId)).size !== params.items.length) throw new Error('Duplicate product.');
       // Validate products & stock
       for (const reqItem of params.items) {
+        quantity(reqItem.quantity);
         const product = await offlineDb.products.get(reqItem.productId);
         if (!product) throw new Error(`Product not found: ${reqItem.productId}`);
         if (!product.active) throw new Error(`Product "${product.name}" is deactivated.`);
@@ -78,10 +84,10 @@ export async function createOfflineSale(params: {
           );
         }
 
-        const unitPrice = Number(reqItem.unitPrice ?? product.sale_price);
+        const unitPrice = amount(reqItem.unitPrice ?? product.sale_price, 'Selling price');
         const lineTotal = lineAmount(reqItem.quantity, unitPrice);
         const costSnapshot = Number(product.average_cost ?? product.purchase_cost ?? 0);
-        const lineProfit = roundMoney((unitPrice - costSnapshot) * reqItem.quantity);
+        const lineProfit = roundMoney(lineTotal - lineAmount(reqItem.quantity, costSnapshot));
 
         subtotal += lineTotal;
         totalProfit += lineProfit;
@@ -101,7 +107,7 @@ export async function createOfflineSale(params: {
         });
 
         // Decrement local product stock
-        const newStock = roundMoney(product.current_stock - reqItem.quantity);
+        const newStock = product.current_stock - reqItem.quantity;
         await offlineDb.products.update(product.id, {
           current_stock: newStock,
           updated_at: new Date().toISOString()
@@ -121,6 +127,7 @@ export async function createOfflineSale(params: {
         });
       }
 
+      if (subtotal > 1_000_000_000) throw new Error('Invoice total cannot exceed 1,000,000,000.');
       subtotal = roundMoney(subtotal);
       totalProfit = roundMoney(totalProfit);
 
@@ -154,6 +161,7 @@ export async function createOfflineSale(params: {
           customer_phone: params.customerPhone || null,
           notes: params.notes || null,
           items: saleItemsToInsert.map((item) => ({
+            id: item.id,
             productId: item.product_id,
             quantity: item.quantity,
             unitPrice: item.unit_sale_price
@@ -169,7 +177,7 @@ export async function createOfflineSale(params: {
       await offlineDb.sales.add(saleRecord);
       await offlineDb.sale_items.bulkAdd(saleItemsToInsert);
       await offlineDb.inventory_movements.bulkAdd(movementsToInsert);
-      await offlineDb.sync_queue.add(syncItem);
+      await enqueueOperation(syncItem);
 
       return { sale: saleRecord, items: saleItemsToInsert };
     }
@@ -181,7 +189,8 @@ export async function createOfflineSale(params: {
 // -----------------------------------------------------------------------------
 export async function createOfflineReturn(params: {
   saleId: string;
-  items: Array<{ productId: string; quantity: number }>;
+  items: Array<{ productId: string; quantity: number; restock?: boolean }>;
+  date?: string;
   reason?: string | null;
 }): Promise<{ returnRow: LocalReturn; items: LocalReturnItem[] }> {
   return await offlineDb.transaction(
@@ -197,7 +206,7 @@ export async function createOfflineReturn(params: {
       offlineDb.settings
     ],
     async () => {
-      const today = todayString();
+      const today = businessDate(params.date || todayString());
       const returnId = crypto.randomUUID();
       const returnNumber = await getNextSequence('return');
       const operationId = crypto.randomUUID();
@@ -205,6 +214,9 @@ export async function createOfflineReturn(params: {
       const sale = await offlineDb.sales.get(params.saleId);
       if (!sale) throw new Error('Original sale bill not found in local records.');
 
+      if (!['COMPLETED', 'PARTIALLY_RETURNED'].includes(sale.status)) throw new Error('This sale cannot accept returns.');
+      if (today < sale.sale_date) throw new Error('Return date cannot precede sale date.');
+      if (!params.items.length || new Set(params.items.map(i => i.productId)).size !== params.items.length) throw new Error('Choose distinct return items.');
       const saleItems = await offlineDb.sale_items.where('sale_id').equals(params.saleId).toArray();
       const existingReturns = await offlineDb.returns.where('sale_id').equals(params.saleId).toArray();
       const existingReturnItems = await offlineDb.return_items
@@ -218,6 +230,7 @@ export async function createOfflineReturn(params: {
       const movementsToInsert: LocalInventoryMovement[] = [];
 
       for (const reqItem of params.items) {
+        quantity(reqItem.quantity);
         const saleItem = saleItems.find((si) => si.product_id === reqItem.productId);
         if (!saleItem) throw new Error(`Product was not part of original sale invoice ${sale.invoice_number}`);
 
@@ -232,8 +245,15 @@ export async function createOfflineReturn(params: {
           );
         }
 
-        const refundLine = roundMoney(reqItem.quantity * saleItem.unit_sale_price);
-        const costLine = roundMoney(reqItem.quantity * saleItem.unit_cost_snapshot);
+        const previous = existingReturnItems.filter(ri => ri.sale_item_id === saleItem.id);
+        const refundLine = reqItem.quantity === returnable
+          ? roundMoney(saleItem.line_total - previous.reduce((n, ri) => n + ri.refund_amount, 0))
+          : lineAmount(reqItem.quantity, saleItem.unit_sale_price);
+        const originalCost = lineAmount(saleItem.quantity, saleItem.unit_cost_snapshot);
+        const returnedCost = reqItem.quantity === returnable
+          ? roundMoney(originalCost - previous.reduce((n, ri) => n + lineAmount(ri.quantity_returned, ri.unit_cost_snapshot), 0))
+          : lineAmount(reqItem.quantity, saleItem.unit_cost_snapshot);
+        const costLine = reqItem.restock === false ? 0 : returnedCost;
         const profitLine = roundMoney(refundLine - costLine);
 
         refundTotal += refundLine;
@@ -249,21 +269,26 @@ export async function createOfflineReturn(params: {
           unit_sale_price_snapshot: saleItem.unit_sale_price,
           unit_cost_snapshot: saleItem.unit_cost_snapshot,
           refund_amount: refundLine,
+          restock: reqItem.restock !== false,
+          product_name_snapshot: saleItem.product_name_snapshot,
+          unit_snapshot: saleItem.unit_snapshot,
           profit_reversed: profitLine
         });
 
         // Restore local product stock
         const product = await offlineDb.products.get(reqItem.productId);
-        if (product) {
-          const newStock = roundMoney(product.current_stock + reqItem.quantity);
+        if (!product) throw new Error('Returned product not found.');
+        if (reqItem.restock !== false) {
+          const newStock = product.current_stock + reqItem.quantity;
           await offlineDb.products.update(product.id, {
             current_stock: newStock,
+            average_cost: averageCost(product.current_stock, product.average_cost, reqItem.quantity, saleItem.unit_cost_snapshot),
             updated_at: new Date().toISOString()
           });
         }
 
         // Record inventory movement
-        movementsToInsert.push({
+        if (reqItem.restock !== false) movementsToInsert.push({
           id: crypto.randomUUID(),
           product_id: reqItem.productId,
           movement_type: 'SALE_RETURN_IN',
@@ -294,7 +319,8 @@ export async function createOfflineReturn(params: {
 
       // Update sale status
       const totalRefundedOnSale = existingReturns.reduce((sum, r) => sum + r.refund_total, 0) + refundTotal;
-      const newStatus = totalRefundedOnSale >= sale.total ? 'FULLY_RETURNED' : 'PARTIALLY_RETURNED';
+      const fullyReturned = saleItems.every(si => [...existingReturnItems, ...returnItemsToInsert].filter(ri => ri.sale_item_id === si.id).reduce((n, ri) => n + ri.quantity_returned, 0) === si.quantity);
+      const newStatus = fullyReturned ? 'FULLY_RETURNED' : 'PARTIALLY_RETURNED';
       const newNetTotal = roundMoney(sale.total - totalRefundedOnSale);
 
       await offlineDb.sales.update(sale.id, {
@@ -314,7 +340,7 @@ export async function createOfflineReturn(params: {
           return_number: returnNumber,
           date: today,
           reason: params.reason || null,
-          items: params.items.map((i) => ({ productId: i.productId, quantity: i.quantity }))
+          items: returnItemsToInsert.map(i => ({ id: i.id, productId: i.product_id, quantity: i.quantity_returned, restock: i.restock }))
         },
         status: 'PENDING',
         attempt_count: 0,
@@ -326,7 +352,7 @@ export async function createOfflineReturn(params: {
       await offlineDb.returns.add(returnRecord);
       await offlineDb.return_items.bulkAdd(returnItemsToInsert);
       await offlineDb.inventory_movements.bulkAdd(movementsToInsert);
-      await offlineDb.sync_queue.add(syncItem);
+      await enqueueOperation(syncItem);
 
       return { returnRow: returnRecord, items: returnItemsToInsert };
     }
@@ -355,22 +381,25 @@ export async function recordOfflineStock(params: {
       offlineDb.settings
     ],
     async () => {
-      const today = params.date || todayString();
+      const today = businessDate(params.date || todayString());
+      quantity(params.quantity);
+      amount(params.purchaseCost, 'Buying price');
       const product = await offlineDb.products.get(params.productId);
       if (!product) throw new Error('Product not found in local catalog.');
 
       const entryId = crypto.randomUUID();
       const entryNumber = await getNextSequence('stock');
       const operationId = crypto.randomUUID();
-      const totalAmount = roundMoney(params.quantity * params.purchaseCost);
+      const totalAmount = params.quantity * params.purchaseCost;
+      if (totalAmount >= 1_000_000_000_000) throw new Error('Stock entry value is too large. Split it into smaller entries.');
 
       // Weighted average calculation
       const currentStock = Number(product.current_stock || 0);
-      const currentAvg = Number(product.average_cost || product.purchase_cost || 0);
-      const newStock = roundMoney(currentStock + params.quantity);
+      const currentAvg = Number(product.average_cost ?? product.purchase_cost ?? 0);
+      const newStock = currentStock + params.quantity;
       const newAverage =
         newStock > 0
-          ? roundMoney((currentStock * currentAvg + params.quantity * params.purchaseCost) / newStock)
+          ? averageCost(currentStock, currentAvg, params.quantity, params.purchaseCost)
           : params.purchaseCost;
 
       // Update product stock and costs
@@ -435,7 +464,7 @@ export async function recordOfflineStock(params: {
         line_total: totalAmount
       });
       await offlineDb.inventory_movements.add(movement);
-      await offlineDb.sync_queue.add(syncItem);
+      await enqueueOperation(syncItem);
 
       return entryRecord;
     }
@@ -445,45 +474,6 @@ export async function recordOfflineStock(params: {
 // -----------------------------------------------------------------------------
 // 4. CREATE / UPDATE OFFLINE PRODUCT (WITH AUTOMATIC DEDUPLICATION)
 // -----------------------------------------------------------------------------
-export async function deduplicateLocalProducts(): Promise<void> {
-  const allProducts = await offlineDb.products.toArray();
-  const byName = new Map<string, LocalProduct[]>();
-
-  for (const p of allProducts) {
-    const key = p.name.trim().toLowerCase();
-    if (!byName.has(key)) byName.set(key, []);
-    byName.get(key)!.push(p);
-  }
-
-  for (const [, group] of byName) {
-    if (group.length > 1) {
-      // Sort: highest stock first, then latest updated
-      group.sort((a, b) => (b.current_stock - a.current_stock) || b.updated_at.localeCompare(a.updated_at));
-      const keeper = group[0];
-      const duplicates = group.slice(1);
-
-      let mergedStock = keeper.current_stock;
-      for (const dup of duplicates) {
-        if (dup.current_stock > 0) {
-          mergedStock += dup.current_stock;
-        }
-        await offlineDb.products.delete(dup.id);
-        await offlineDb.sale_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
-        await offlineDb.return_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
-        await offlineDb.stock_entry_items.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
-        await offlineDb.inventory_movements.where('product_id').equals(dup.id).modify({ product_id: keeper.id });
-      }
-
-      if (mergedStock !== keeper.current_stock) {
-        await offlineDb.products.update(keeper.id, {
-          current_stock: mergedStock,
-          updated_at: new Date().toISOString()
-        });
-      }
-    }
-  }
-}
-
 export async function saveOfflineProduct(params: {
   id?: string;
   name: string;
@@ -503,36 +493,47 @@ export async function saveOfflineProduct(params: {
     [
       offlineDb.products,
       offlineDb.inventory_movements,
-      offlineDb.sync_queue
+      offlineDb.sync_queue,
+      offlineDb.settings
     ],
     async () => {
       const normalizedName = params.name.trim().toLowerCase();
+      if (!normalizedName || params.name.trim().length > 160 || !params.unit.trim() || params.unit.trim().length > 40) throw new Error('Enter a valid product name and unit.');
       const operationId = crypto.randomUUID();
       const openingStock = Number(params.openingStock ?? params.opening_stock ?? 0);
       const purchaseCost = Number(params.purchaseCost ?? params.purchase_cost ?? 0);
       const salePrice = Number(params.salePrice ?? params.sale_price ?? 0);
       const minimumStock = Number(params.minimumStock ?? params.minimum_stock ?? 10);
 
+      quantity(openingStock, true); quantity(minimumStock, true); amount(salePrice, 'Selling price');
+      // An existing weighted-average cost may legitimately have fractional precision.
+      if (!params.id) amount(purchaseCost, 'Buying price');
       // 1. Check if editing by ID or if a product with the same name already exists
       let existing: LocalProduct | undefined;
       if (params.id) {
         existing = await offlineDb.products.get(params.id);
       } else {
         const allProducts = await offlineDb.products.toArray();
-        existing = allProducts.find((p) => p.name.trim().toLowerCase() === normalizedName);
+        if (allProducts.some(p => p.name.trim().toLowerCase() === normalizedName)) throw new Error('This product already exists. Use Add stock to restock it.');
       }
 
       let product: LocalProduct;
 
+      if (params.id && !existing) throw new Error('Product not found.');
       if (existing) {
-        // Product already exists: update details and add any opening stock entered
+        if (openingStock) throw new Error('Use Add stock to change existing stock.');
+        if (existing.unit !== params.unit.trim()) throw new Error('Create a separate product to change its unit.');
+        if ((await offlineDb.products.toArray()).some(p => p.id !== existing.id && p.name.trim().toLowerCase() === normalizedName)) throw new Error('Product name already exists.');
+        if (existing.current_stock === 0 && purchaseCost !== existing.average_cost) amount(purchaseCost, 'Buying price');
+        if (existing.name === params.name.trim() && existing.unit === params.unit.trim() && existing.sale_price === salePrice && existing.minimum_stock === minimumStock && existing.active === (params.active ?? existing.active) && (existing.current_stock > 0 || existing.average_cost === purchaseCost)) return existing;
+        // Update metadata without changing inventory quantities.
         const currentStock = Number(existing.current_stock || 0);
-        const currentAvg = Number(existing.average_cost || existing.purchase_cost || 0);
-        const newStock = roundMoney(currentStock + openingStock);
+        const currentAvg = Number(existing.average_cost ?? existing.purchase_cost ?? 0);
+        const newStock = currentStock + openingStock;
         const newAverage =
           newStock > 0 && openingStock > 0
-            ? roundMoney((currentStock * currentAvg + openingStock * purchaseCost) / newStock)
-            : (existing.average_cost || purchaseCost);
+            ? averageCost(currentStock, currentAvg, openingStock, purchaseCost)
+            : (currentStock === 0 ? purchaseCost : existing.average_cost);
 
         product = {
           ...existing,
@@ -562,7 +563,7 @@ export async function saveOfflineProduct(params: {
           });
         }
 
-        await offlineDb.sync_queue.add({
+        await enqueueOperation({
           id: crypto.randomUUID(),
           operation_id: operationId,
           operation_type: 'UPDATE_PRODUCT',
@@ -574,7 +575,8 @@ export async function saveOfflineProduct(params: {
             purchaseCost: product.purchase_cost,
             salePrice: product.sale_price,
             minimumStock: product.minimum_stock,
-            active: product.active
+            active: product.active,
+            expected: { name: existing.name, unit: existing.unit, sale_price: existing.sale_price, minimum_stock: existing.minimum_stock, active: existing.active }
           },
           status: 'PENDING',
           attempt_count: 0,
@@ -613,7 +615,7 @@ export async function saveOfflineProduct(params: {
           });
         }
 
-        await offlineDb.sync_queue.add({
+        await enqueueOperation({
           id: crypto.randomUUID(),
           operation_id: operationId,
           operation_type: 'CREATE_PRODUCT',
@@ -644,6 +646,7 @@ export async function saveOfflineProduct(params: {
 // 5. EXPORT OFFLINE BACKUP
 // -----------------------------------------------------------------------------
 export async function exportOfflineBackup() {
+  return offlineDb.transaction('r', offlineDb.tables, async () => {
   const [
     products,
     sales,
@@ -680,6 +683,7 @@ export async function exportOfflineBackup() {
     stock_entry_items,
     inventory_movements,
     sync_queue,
-    settings
+    settings: settings.filter(setting => setting.key !== 'maintenance')
   };
+  });
 }

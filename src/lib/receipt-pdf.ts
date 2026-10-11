@@ -23,6 +23,9 @@ export type ReceiptPdfDocument = {
 
 export type ReceiptPdfSettings = {
   business_name: string;
+  address?: string;
+  phone1?: string;
+  phone2?: string;
   receipt_footer: string;
 };
 
@@ -80,6 +83,9 @@ export function createReceiptPdf(document: ReceiptPdfDocument, settings: Receipt
 
   // 1. Header (Centered at CENTER_X = 40mm)
   addText(settings.business_name || 'Aziz & Son Wholesaler', CENTER_X, CONTENT_WIDTH, 11, true, 'center');
+  if (settings.address) addText(settings.address, CENTER_X, CONTENT_WIDTH, 8, false, 'center');
+  const phone = [settings.phone1, settings.phone2].filter(Boolean).join(' / ');
+  if (phone) addText(phone, CENTER_X, CONTENT_WIDTH, 8, false, 'center');
   y += 0.8;
   addText(document.kind === 'RETURN' ? 'RETURN' : 'SALE', CENTER_X, CONTENT_WIDTH, 11, true, 'center');
   y += 1.5;

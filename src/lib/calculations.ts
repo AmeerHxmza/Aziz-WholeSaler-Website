@@ -15,8 +15,8 @@ export function amount(value: unknown, label = 'Amount'): number {
   ) {
     throw new Error(`${label} must be between 0 and 1,000,000,000.`);
   }
-  if (Math.abs(number - roundMoney(number)) > 0.000001) {
-    throw new Error(`${label} can have at most 2 decimal places.`);
+  if (!Number.isSafeInteger(number)) {
+    throw new Error(`${label} must be a whole number.`);
   }
   return roundMoney(number);
 }
@@ -33,8 +33,8 @@ export function quantity(value: unknown, allowZero = false): number {
   ) {
     throw new Error('Enter a valid quantity (up to 1,000,000).');
   }
-  if (Math.abs(number - roundQuantity(number)) > 0.0000001) {
-    throw new Error('Quantity can have at most 3 decimal places.');
+  if (!Number.isSafeInteger(number)) {
+    throw new Error('Quantity must be a whole number.');
   }
   const rounded = roundQuantity(number);
   if (!allowZero && rounded <= 0) throw new Error('Quantity must be greater than zero.');
@@ -72,7 +72,7 @@ export function dateRange(start?: string, end?: string): void {
 }
 
 export const formatMoney = (value: number) =>
-  `Rs. ${new Intl.NumberFormat('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value)}`;
+  `Rs. ${new Intl.NumberFormat('en-PK', { minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(value)}`;
 
 export const formatQuantity = (value: number) =>
   new Intl.NumberFormat('en-PK', { maximumFractionDigits: 3 }).format(value);

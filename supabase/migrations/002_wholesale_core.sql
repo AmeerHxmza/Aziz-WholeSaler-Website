@@ -236,7 +236,7 @@ declare
   v_sale_item_id bigint;
 begin
   if exists (select 1 from information_schema.tables where table_schema='public' and table_name='returns_legacy') then
-    for r in select * from public.returns_legacy loop
+    for r in select * from public.returns_legacy where sale_id is not null loop
       if not exists (select 1 from public.returns where return_number = r.return_number) then
         v_new_id := gen_random_uuid();
         insert into public.returns(id, owner_id, return_number, bill_number, sale_id, invoice_number, return_date, movement_date, refund_total, profit_reversed, reason, notes, created_at, created_by)
@@ -258,12 +258,12 @@ declare
   v_max_sale int;
   v_max_return int;
 begin
-  select coalesce(max(nullif(regexp_replace(invoice_number, '\D', '', 'g'), '')::int), 0) into v_max_sale from public.sales;
+  select coalesce(max(nullif(substring(invoice_number from '([0-9]+)$'), '')::int), 0) into v_max_sale from public.sales;
   if v_max_sale > 0 then
     perform setval('public.sale_invoice_seq', v_max_sale);
   end if;
   
-  select coalesce(max(nullif(regexp_replace(return_number, '\D', '', 'g'), '')::int), 0) into v_max_return from public.returns;
+  select coalesce(max(nullif(substring(return_number from '([0-9]+)$'), '')::int), 0) into v_max_return from public.returns;
   if v_max_return > 0 then
     perform setval('public.return_number_seq', v_max_return);
   end if;

@@ -130,13 +130,13 @@ test('End-to-End Wholesaler Flow: New Product -> Stock Inward -> Sale -> Return 
   });
 
   // Calculations:
-  const getSaleProfit = (s: any) => {
+  const getSaleProfit = (s: typeof hydratedSales[number]) => {
     return s.items.reduce(
-      (sum: number, item: any) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot)),
+      (sum: number, item: typeof hydratedSales[number]['items'][number]) => sum + (Number(item.line_total) - Number(item.cost_total_snapshot)),
       0
     );
   };
-  const getReturnProfitReduction = (r: any) => {
+  const getReturnProfitReduction = (r: typeof hydratedReturns[number]) => {
     const refund = Number(r.refund_amount);
     const cost = r.restock ? Number(r.cost_amount_snapshot || 0) : 0;
     return refund - cost;

@@ -1,519 +1,207 @@
-import { offlineDb, type LocalSyncQueueItem } from '../db/offline-db';
-import { setSequenceFloor } from '../db/offline-operations';
+import { offlineDb, type LocalSale, type LocalSyncQueueItem } from '../db/offline-db';
 import { getSupabase } from '../supabase';
+import { exportOfflineBackup } from '../db/offline-operations';
 
+type Row = Record<string, unknown>;
+export type CloudSnapshot = Record<string, unknown> & { owner_id: string };
 export interface SyncStatusState {
-  isOnline: boolean;
-  isSyncing: boolean;
-  pendingCount: number;
-  lastSyncTime: string | null;
-  lastError: string | null;
+  isOnline: boolean; isSyncing: boolean; pendingCount: number;
+  lastSyncTime: string | null; lastError: string | null;
+}
+type SyncListener = (state: SyncStatusState) => void;
+const str = (v: unknown) => v == null ? '' : String(v);
+const num = (v: unknown) => Number(v ?? 0);
+const message = (e: unknown) => e instanceof Error ? e.message : str((e as Row)?.message || e);
+const rows = (snapshot: CloudSnapshot, key: string): Row[] => {
+  if (!Array.isArray(snapshot[key])) throw new Error(`Incomplete cloud snapshot: ${key}. Local records were retained.`);
+  return snapshot[key] as Row[];
+};
+
+// Check the queue and replace all tables in one transaction. A sale made while
+// downloading prevents replacement, so its stock effect can never be overwritten.
+export async function applyCloudSnapshot(snapshot: CloudSnapshot, owner: string): Promise<boolean> {
+  if (snapshot.owner_id !== owner) throw new Error('Cloud snapshot belongs to another account.');
+  for (const table of ['products','sales','sale_items','returns','return_items','stock_entries','stock_entry_items','inventory_movements','loans','loan_settlements','business_settings','stock_movements','stock_adjustments','invoice_sequences','return_sequences','audit_log']) rows(snapshot, table);
+  const saleItems = rows(snapshot, 'sale_items');
+  const itemIds = new Map(saleItems.map(i => [str(i.id), str(i.client_id || i.id)]));
+  return offlineDb.transaction('rw', offlineDb.tables, async () => {
+    const bound = await offlineDb.settings.get('owner_id');
+    if (bound && bound.value !== owner) throw new Error('Local database belongs to another account.');
+    await offlineDb.settings.put({ key: 'cloud_snapshot', value: snapshot });
+    if (await offlineDb.sync_queue.filter(q => q.status !== 'SYNCED').count()) return false;
+    for (const table of offlineDb.tables) if (!['sync_queue', 'settings'].includes(table.name)) await table.clear();
+    await offlineDb.products.bulkPut(rows(snapshot,'products').map(p => ({
+      id: str(p.id), name: str(p.name), unit: str(p.unit), current_stock: num(p.current_stock),
+      average_cost: num(p.average_cost), purchase_cost: num(p.purchase_cost), sale_price: num(p.sale_price),
+      minimum_stock: num(p.minimum_stock), active: Boolean(p.active), updated_at: str(p.updated_at)
+    })));
+    await offlineDb.sales.bulkPut(rows(snapshot,'sales').map(s => ({
+      id: str(s.id), invoice_number: str(s.invoice_number), sale_date: str(s.sale_date),
+      customer_name: str(s.customer_name), customer_phone: str(s.customer_phone), subtotal: num(s.subtotal),
+      total: num(s.total), net_total: num(s.net_total), original_profit: num(s.original_profit),
+      status: (s.status === 'CONFIRMED' ? 'COMPLETED' : s.status) as LocalSale['status'],
+      notes: str(s.notes), created_at: str(s.created_at), sync_status: 'SYNCED'
+    })));
+    await offlineDb.sale_items.bulkPut(saleItems.map(i => ({
+      id: str(i.client_id || i.id), sale_id: str(i.sale_id), product_id: str(i.product_id),
+      product_name_snapshot: str(i.product_name_snapshot), unit_snapshot: str(i.unit_snapshot),
+      quantity: num(i.quantity), unit_sale_price: num(i.unit_sale_price), unit_cost_snapshot: num(i.unit_cost_snapshot),
+      line_total: num(i.line_total), original_profit: num(i.original_profit)
+    })));
+    await offlineDb.returns.bulkPut(rows(snapshot,'returns').map(r => ({
+      id: str(r.id), return_number: str(r.return_number), sale_id: str(r.sale_id), invoice_number: str(r.invoice_number),
+      return_date: str(r.return_date), refund_total: num(r.refund_total), profit_reversed: num(r.profit_reversed),
+      reason: str(r.reason), created_at: str(r.created_at), sync_status: 'SYNCED'
+    })));
+    await offlineDb.return_items.bulkPut(rows(snapshot,'return_items').map(i => {
+      const original = saleItems.find(si => str(si.id) === str(i.sale_item_id));
+      return {
+        id: str(i.client_id || i.id), return_id: str(i.return_id), sale_item_id: itemIds.get(str(i.sale_item_id)) || str(i.sale_item_id),
+        product_id: str(i.product_id), quantity_returned: num(i.quantity_returned),
+        unit_sale_price_snapshot: num(i.unit_sale_price_snapshot), unit_cost_snapshot: num(i.unit_cost_snapshot),
+        refund_amount: num(i.refund_amount), profit_reversed: num(i.profit_reversed), restock: i.restock !== false,
+        product_name_snapshot: str(original?.product_name_snapshot), unit_snapshot: str(original?.unit_snapshot)
+      };
+    }));
+    await offlineDb.stock_entries.bulkPut(rows(snapshot,'stock_entries').map(s => ({ id: str(s.id), entry_number: str(s.reference_number), entry_date: str(s.entry_date), movement_type: 'PURCHASE', total_amount: num(s.total_cost), notes: str(s.notes), created_at: str(s.created_at), sync_status: 'SYNCED' })));
+    await offlineDb.stock_entry_items.bulkPut(rows(snapshot,'stock_entry_items').map(i => ({ id: str(i.id), entry_id: str(i.stock_entry_id), product_id: str(i.product_id), quantity: num(i.quantity), purchase_cost: num(i.unit_cost), line_total: num(i.line_cost) })));
+    await offlineDb.inventory_movements.bulkPut(rows(snapshot,'inventory_movements').map(m => ({
+      id: str(m.id), product_id: str(m.product_id), movement_type: m.movement_type as 'STOCK_IN',
+      quantity_delta: num(m.quantity_delta), unit_cost_snapshot: num(m.unit_cost_snapshot),
+      reference_type: str(m.reference_type), reference_id: str(m.reference_id), notes: str(m.notes), created_at: str(m.created_at)
+    })));
+    await offlineDb.settings.delete('maintenance');
+    await offlineDb.settings.bulkPut([
+      { key: 'owner_id', value: owner }, { key: 'cloud_loans', value: snapshot.loans },
+      { key: 'cloud_loan_settlements', value: snapshot.loan_settlements },
+      { key: 'cloud_settings', value: rows(snapshot, 'business_settings')[0] || null },
+      { key: 'cloud_snapshot', value: snapshot }, { key: 'last_sync', value: new Date().toISOString() }
+    ]);
+    return true;
+  });
 }
 
-type SyncListener = (state: SyncStatusState) => void;
-
-class SyncEngine {
-  private listeners: Set<SyncListener> = new Set();
+export class SyncEngine {
+  private listeners = new Set<SyncListener>();
   private isSyncing = false;
-  private isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+  private isOnline = typeof navigator === 'undefined' || navigator.onLine !== false;
   private pendingCount = 0;
   private lastSyncTime: string | null = null;
   private lastError: string | null = null;
-  private timer: NodeJS.Timeout | null = null;
-
-  constructor() {
+  private active: Promise<void> | null = null;
+  constructor(private readonly clientFactory = getSupabase) {
     if (typeof window !== 'undefined') {
-      window.addEventListener('online', () => {
-        this.isOnline = true;
-        this.notify();
-        void this.sync();
-      });
-      window.addEventListener('offline', () => {
-        this.isOnline = false;
-        this.notify();
-      });
-
-      // Update pending count on boot
+      window.addEventListener('online', () => { this.isOnline = true; void this.sync(); });
+      window.addEventListener('offline', () => { this.isOnline = false; this.notify(); });
+      setInterval(() => { if (navigator.onLine) void this.sync(); }, 20_000);
       void this.updatePendingCount();
-
-      // Periodic check every 20 seconds
-      this.timer = setInterval(() => {
-        if (this.isOnline && !this.isSyncing) {
-          void this.sync();
-        }
-      }, 20000);
     }
   }
-
-  public subscribe(listener: SyncListener): () => void {
-    this.listeners.add(listener);
-    listener(this.getState());
-    return () => this.listeners.delete(listener);
+  subscribe(listener: SyncListener) { this.listeners.add(listener); listener(this.getState()); return () => { this.listeners.delete(listener); }; }
+  getState(): SyncStatusState { return { isOnline: this.isOnline, isSyncing: this.isSyncing, pendingCount: this.pendingCount, lastSyncTime: this.lastSyncTime, lastError: this.lastError }; }
+  private notify() { for (const listener of this.listeners) listener(this.getState()); }
+  async updatePendingCount() {
+    this.pendingCount = await offlineDb.sync_queue.filter(q => q.status !== 'SYNCED').count();
+    this.notify(); return this.pendingCount;
   }
-
-  public getState(): SyncStatusState {
-    return {
-      isOnline: this.isOnline,
-      isSyncing: this.isSyncing,
-      pendingCount: this.pendingCount,
-      lastSyncTime: this.lastSyncTime,
-      lastError: this.lastError
-    };
+  async checkActualConnection() {
+    const client = this.clientFactory();
+    if (!client || (typeof navigator !== 'undefined' && navigator.onLine === false)) return false;
+    const { data, error } = await client.auth.getSession();
+    return !error && Boolean(data.session);
   }
-
-  private notify() {
-    const state = this.getState();
-    this.listeners.forEach((listener) => listener(state));
+  sync(): Promise<void> {
+    if (this.active) return this.active;
+    this.active = this.withLock().finally(() => { this.active = null; });
+    return this.active;
   }
-
-  public async updatePendingCount(): Promise<number> {
+  private async withLock() {
+    if (typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request('aziz-cloud-sync', () => this.run());
+    else await this.run();
+  }
+  private async run() {
+    this.isSyncing = true; this.lastError = null; this.notify();
     try {
-      this.pendingCount = await offlineDb.sync_queue
-        .where('status')
-        .equals('PENDING')
-        .count();
-      this.notify();
-      return this.pendingCount;
-    } catch {
-      return 0;
-    }
-  }
-
-  // Real connectivity ping (not just navigator.onLine)
-  public async checkActualConnection(): Promise<boolean> {
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      return false;
-    }
-    const supabase = getSupabase();
-    if (!supabase) return false;
-    try {
-      // Lightweight call with 2 second timeout
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 2000);
-      const { error } = await supabase.from('products').select('id').limit(1).abortSignal(controller.signal);
-      clearTimeout(timeout);
-      return !error;
-    } catch {
-      return false;
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // MAIN SYNC WORKFLOW
-  // ---------------------------------------------------------------------------
-  public async sync(): Promise<void> {
-    if (this.isSyncing) return;
-    const supabase = getSupabase();
-    if (!supabase) return;
-
-    const reachable = await this.checkActualConnection();
-    if (!reachable) {
-      this.isOnline = false;
-      this.notify();
-      return;
-    }
-
-    this.isOnline = true;
-    this.isSyncing = true;
-    this.lastError = null;
-    this.notify();
-
-    try {
-      // 1. Process outbound pending operations in chronological order
-      const pendingItems = await offlineDb.sync_queue
-        .where('status')
-        .equals('PENDING')
-        .sortBy('created_at');
-
-      for (const item of pendingItems) {
+      const client = this.clientFactory();
+      if (!client) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) { this.isOnline = false; return; }
+      const { data, error } = await client.auth.getSession();
+      if (error) throw error;
+      if (!data.session) throw new Error('Sign in online to synchronize. Your local records are retained.');
+      const owner = data.session.user.id;
+      const bound = await offlineDb.settings.get('owner_id');
+      if (bound && bound.value !== owner) throw new Error('Sign in with the account assigned to this local database.');
+      const { data: admin, error: adminError } = await client.rpc('is_shop_admin');
+      if (adminError) throw adminError;
+      if (!admin) throw new Error('Shop administrator access required.');
+      await offlineDb.settings.put({ key: 'owner_id', value: owner });
+      this.isOnline = true;
+      const queue = (await offlineDb.sync_queue.filter(q => q.status !== 'SYNCED').toArray()).sort((a,b) => (a.sequence ?? 0) - (b.sequence ?? 0) || a.created_at.localeCompare(b.created_at));
+      for (const item of queue) {
+        if (item.payload.protocol !== 2) throw new Error('Old unsynchronized records need reconciliation. Export a backup before proceeding; nothing was discarded.');
         await this.processQueueItem(item);
       }
-
-      // 2. Download authoritative cloud state to keep local mirror current
-      await this.pullCloudState();
-
+      await this.pullCloudState(owner);
+    } catch (error) {
+      this.lastError = message(error);
+      if (/fetch|network|offline/i.test(this.lastError)) this.isOnline = false;
+    } finally { this.isSyncing = false; await this.updatePendingCount(); this.notify(); }
+  }
+  private async processQueueItem(item: LocalSyncQueueItem) {
+    const client = this.clientFactory();
+    if (!client) throw new Error('Cloud connection is not configured.');
+    await offlineDb.sync_queue.update(item.id, { status: 'SYNCING', attempt_count: item.attempt_count + 1, last_attempt_at: new Date().toISOString() });
+    const { error } = await client.rpc('sync_shop_operation', { p_operation_id: item.operation_id, p_type: item.operation_type, p_payload: item.payload });
+    if (error) {
+      await offlineDb.sync_queue.update(item.id, { status: error.message.includes('CONFLICT:') ? 'CONFLICT' : 'FAILED', last_error: error.message });
+      // Keep a complete cloud snapshot for conflict review without replacing pending local work.
+      await this.pullCloudState().catch(() => {});
+      throw error;
+    }
+    await offlineDb.sync_queue.update(item.id, { status: 'SYNCED', last_error: null });
+  }
+  async pullCloudState(expectedOwner?: string) {
+    const client = this.clientFactory();
+    if (!client) throw new Error('Cloud connection is not configured.');
+    const { data: auth } = await client.auth.getSession();
+    const owner = expectedOwner || auth.session?.user.id;
+    if (!owner) throw new Error('Sign in before downloading cloud records.');
+    const { data, error } = await client.rpc('shop_snapshot');
+    if (error) throw error;
+    if (await applyCloudSnapshot(data as CloudSnapshot, owner)) {
       this.lastSyncTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch (err: any) {
-      this.lastError = err?.message || 'Sync encountered an error';
-    } finally {
-      this.isSyncing = false;
-      await this.updatePendingCount();
-      this.notify();
+      if (typeof window !== 'undefined') window.dispatchEvent(new Event('aziz-data-changed'));
     }
   }
-
-  private async processQueueItem(item: LocalSyncQueueItem): Promise<void> {
-    const supabase = getSupabase();
-    if (!supabase) return;
-
-    try {
-      await offlineDb.sync_queue.update(item.id, { status: 'SYNCING' });
-
-      switch (item.operation_type) {
-        case 'CREATE_SALE': {
-          const payload = item.payload;
-          const { error } = await supabase.rpc('create_sale', {
-            p_date: payload.sale_date,
-            p_items: payload.items,
-            p_customer_name: payload.customer_name,
-            p_customer_phone: payload.customer_phone,
-            p_notes: payload.notes
-          });
-          if (error && !error.message.includes('duplicate')) throw error;
-
-          await offlineDb.sales.update(item.entity_id, { sync_status: 'SYNCED' });
-          break;
-        }
-
-        case 'CREATE_RETURN': {
-          const payload = item.payload;
-          const { error } = await supabase.rpc('create_return', {
-            p_sale_id: payload.sale_id,
-            p_date: payload.date,
-            p_items: payload.items,
-            p_reason: payload.reason
-          });
-          if (error && !error.message.includes('duplicate')) throw error;
-
-          await offlineDb.returns.update(item.entity_id, { sync_status: 'SYNCED' });
-          break;
-        }
-
-        case 'RECORD_STOCK': {
-          const payload = item.payload;
-          const { error } = await supabase.rpc('record_stock', {
-            p_product_id: payload.productId,
-            p_quantity: payload.quantity,
-            p_purchase_cost: payload.purchaseCost,
-            p_date: payload.date,
-            p_movement_type: payload.movementType,
-            p_reference: null,
-            p_notes: payload.notes
-          });
-          if (error && !error.message.includes('duplicate')) throw error;
-
-          await offlineDb.stock_entries.update(item.entity_id, { sync_status: 'SYNCED' });
-          break;
-        }
-
-        case 'CREATE_PRODUCT': {
-          const payload = item.payload;
-          const { error } = await supabase.rpc('create_product', {
-            p_name: payload.name,
-            p_unit: payload.unit,
-            p_purchase_cost: payload.purchaseCost,
-            p_sale_price: payload.salePrice,
-            p_minimum_stock: payload.minimumStock,
-            p_opening_stock: payload.openingStock,
-            p_id: payload.id
-          });
-          if (error && !error.message.includes('duplicate')) throw error;
-          break;
-        }
-
-        case 'UPDATE_PRODUCT': {
-          const payload = item.payload;
-          const { error } = await supabase.rpc('update_product', {
-            p_product_id: payload.id,
-            p_name: payload.name,
-            p_unit: payload.unit,
-            p_purchase_cost: payload.purchaseCost,
-            p_sale_price: payload.salePrice,
-            p_minimum_stock: payload.minimumStock,
-            p_active: payload.active
-          });
-          if (error) throw error;
-          break;
-        }
-      }
-
-      await offlineDb.sync_queue.update(item.id, {
-        status: 'SYNCED',
-        last_attempt_at: new Date().toISOString(),
-        last_error: null
-      });
-    } catch (err: any) {
-      await offlineDb.sync_queue.update(item.id, {
-        status: 'FAILED',
-        attempt_count: item.attempt_count + 1,
-        last_attempt_at: new Date().toISOString(),
-        last_error: err?.message || 'Sync failed'
-      });
-    }
-  }
-
-  // Wipe local IndexedDB offline tables completely
-  public async clearLocalDatabase(): Promise<void> {
-    await offlineDb.transaction('rw', [
-      offlineDb.products,
-      offlineDb.sales,
-      offlineDb.sale_items,
-      offlineDb.returns,
-      offlineDb.return_items,
-      offlineDb.stock_entries,
-      offlineDb.stock_entry_items,
-      offlineDb.inventory_movements,
-      offlineDb.sync_queue,
-      offlineDb.settings
-    ], async () => {
-      await Promise.all([
-        offlineDb.products.clear(),
-        offlineDb.sales.clear(),
-        offlineDb.sale_items.clear(),
-        offlineDb.returns.clear(),
-        offlineDb.return_items.clear(),
-        offlineDb.stock_entries.clear(),
-        offlineDb.stock_entry_items.clear(),
-        offlineDb.inventory_movements.clear(),
-        offlineDb.sync_queue.clear(),
-        offlineDb.settings.clear()
-      ]);
+  async clearLocalDatabase() {
+    await offlineDb.transaction('rw', offlineDb.tables, async () => {
+      if (await offlineDb.sync_queue.filter(q => q.status !== 'SYNCED').count()) throw new Error('Cannot clear local storage while unsynchronized records exist. Export a backup and resolve synchronization first.');
+      for (const table of offlineDb.tables) await table.clear();
     });
-    this.pendingCount = 0;
-    this.notify();
+    this.pendingCount = 0; this.notify();
   }
-
-  // Pull latest cloud state to IndexedDB and adjust invoice numbering floors
-  public async pullCloudState(): Promise<void> {
-    const supabase = getSupabase();
-    if (!supabase) return;
-
-    try {
-      // 1. Fetch Cloud Products
-      const { data: cloudProducts, error: prodErr } = await supabase
-        .from('products')
-        .select('*');
-
-      if (!prodErr && Array.isArray(cloudProducts)) {
-        const cloudProductIds = new Set(cloudProducts.map((p) => p.id));
-
-        // Keep local offline products that have pending creation queued
-        const pendingProductOps = await offlineDb.sync_queue
-          .where('operation_type')
-          .equals('CREATE_PRODUCT')
-          .toArray();
-        const pendingProductIds = new Set(pendingProductOps.map((op) => op.entity_id));
-
-        // Delete any local product that was deleted/reset in cloud and is NOT pending upload
-        const localProducts = await offlineDb.products.toArray();
-        for (const lp of localProducts) {
-          if (!cloudProductIds.has(lp.id) && !pendingProductIds.has(lp.id)) {
-            await offlineDb.products.delete(lp.id);
-          }
-        }
-
-        // Upsert all authoritative cloud products
-        for (const cp of cloudProducts) {
-          await offlineDb.products.put({
-            id: cp.id,
-            name: cp.name,
-            unit: cp.unit,
-            current_stock: Number(cp.current_stock ?? cp.stock ?? 0),
-            average_cost: Number(cp.average_cost ?? cp.purchase_cost ?? 0),
-            purchase_cost: Number(cp.purchase_cost ?? 0),
-            sale_price: Number(cp.sale_price ?? cp.default_sale_price ?? 0),
-            minimum_stock: Number(cp.minimum_stock ?? cp.low_stock_threshold ?? 10),
-            active: cp.active ?? cp.is_active ?? true,
-            updated_at: cp.updated_at || new Date().toISOString()
-          });
-        }
-      }
-
-      // 2. Fetch Cloud Sales and Sale Items
-      const { data: cloudSales, error: salesErr } = await supabase
-        .from('sales')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(300);
-
-      if (!salesErr && Array.isArray(cloudSales)) {
-        const cloudSaleIds = new Set(cloudSales.map((s) => s.id));
-
-        // Any local sale marked SYNCED that is NOT in cloud must be removed (e.g. database was reset)
-        const localSales = await offlineDb.sales.toArray();
-        for (const ls of localSales) {
-          if (ls.sync_status === 'SYNCED' && !cloudSaleIds.has(ls.id)) {
-            await offlineDb.sales.delete(ls.id);
-            await offlineDb.sale_items.where('sale_id').equals(ls.id).delete();
-          }
-        }
-
-        if (cloudSales.length > 0) {
-          const { data: cloudSaleItems } = await supabase
-            .from('sale_items')
-            .select('*')
-            .in('sale_id', Array.from(cloudSaleIds));
-
-          // Put sales into IndexedDB (preserving any local PENDING sales)
-          for (const cs of cloudSales) {
-            const existing = await offlineDb.sales.get(cs.id);
-            if (!existing || existing.sync_status !== 'PENDING') {
-              await offlineDb.sales.put({
-                id: cs.id,
-                invoice_number: cs.invoice_number,
-                sale_date: cs.sale_date,
-                customer_name: cs.customer_name || null,
-                customer_phone: cs.customer_phone || null,
-                subtotal: Number(cs.subtotal),
-                total: Number(cs.total),
-                net_total: Number(cs.net_total),
-                original_profit: Number(cs.original_profit || 0),
-                status: cs.status,
-                notes: cs.notes || null,
-                created_at: cs.created_at,
-                sync_status: 'SYNCED'
-              });
-            }
-          }
-
-          // Put sale_items into IndexedDB
-          if (cloudSaleItems) {
-            for (const csi of cloudSaleItems) {
-              await offlineDb.sale_items.put({
-                id: String(csi.id),
-                sale_id: csi.sale_id,
-                product_id: csi.product_id,
-                product_name_snapshot: csi.product_name_snapshot,
-                unit_snapshot: csi.unit_snapshot,
-                quantity: Number(csi.quantity),
-                unit_sale_price: Number(csi.unit_price ?? csi.unit_sale_price ?? 0),
-                unit_cost_snapshot: Number(csi.purchase_cost_snapshot ?? csi.unit_cost_snapshot ?? 0),
-                line_total: Number(csi.line_total),
-                original_profit: Number(csi.original_profit ?? (csi.line_total - (csi.cost_total_snapshot || ((csi.purchase_cost_snapshot || csi.unit_cost_snapshot || 0) * csi.quantity) || 0)))
-              });
-            }
-          }
-
-          let maxSeq = 0;
-          for (const s of cloudSales) {
-            const match = s.invoice_number?.match(/\d+/);
-            if (match) {
-              const num = parseInt(match[0], 10);
-              if (num > maxSeq) maxSeq = num;
-            }
-          }
-          if (maxSeq > 0) {
-            await setSequenceFloor('sale', maxSeq);
-          }
-        } else {
-          // Cloud sales is empty - reset sequence floor
-          await offlineDb.settings.put({ key: 'seq_sale', value: 0 });
-        }
-      }
-
-      // 3. Fetch Cloud Returns and Return Items
-      const { data: cloudReturns, error: returnsErr } = await supabase
-        .from('returns')
-        .select('*')
-        .order('created_at', { ascending: false })
-        .limit(100);
-
-      if (!returnsErr && Array.isArray(cloudReturns)) {
-        const cloudReturnIds = new Set(cloudReturns.map((r) => r.id));
-
-        // Any local return marked SYNCED not in cloud must be removed
-        const localReturns = await offlineDb.returns.toArray();
-        for (const lr of localReturns) {
-          if (lr.sync_status === 'SYNCED' && !cloudReturnIds.has(lr.id)) {
-            await offlineDb.returns.delete(lr.id);
-            await offlineDb.return_items.where('return_id').equals(lr.id).delete();
-          }
-        }
-
-        if (cloudReturns.length > 0) {
-          const { data: cloudReturnItems } = await supabase
-            .from('return_items')
-            .select('*')
-            .in('return_id', Array.from(cloudReturnIds));
-
-          for (const cr of cloudReturns) {
-            const existing = await offlineDb.returns.get(cr.id);
-            if (!existing || existing.sync_status !== 'PENDING') {
-              await offlineDb.returns.put({
-                id: cr.id,
-                return_number: cr.return_number,
-                sale_id: cr.sale_id,
-                invoice_number: cr.invoice_number || '',
-                return_date: cr.return_date,
-                refund_total: Number(cr.refund_amount ?? cr.refund_total ?? 0),
-                profit_reversed: Number(cr.profit_reversed ?? 0),
-                reason: cr.reason,
-                created_at: cr.created_at,
-                sync_status: 'SYNCED'
-              });
-            }
-          }
-
-          if (cloudReturnItems) {
-            for (const cri of cloudReturnItems) {
-              await offlineDb.return_items.put({
-                id: String(cri.id),
-                return_id: cri.return_id,
-                sale_item_id: cri.sale_item_id || '',
-                product_id: cri.product_id,
-                quantity_returned: Number(cri.quantity_returned ?? cri.quantity ?? 0),
-                unit_sale_price_snapshot: Number(cri.unit_price_snapshot ?? cri.unit_sale_price ?? 0),
-                unit_cost_snapshot: Number(cri.unit_cost_snapshot ?? 0),
-                refund_amount: Number(cri.refund_amount ?? 0),
-                profit_reversed: Number(cri.profit_reversed ?? 0)
-              });
-            }
-          }
-
-          let maxRetSeq = 0;
-          for (const r of cloudReturns) {
-            const match = r.return_number?.match(/\d+/);
-            if (match) {
-              const num = parseInt(match[0], 10);
-              if (num > maxRetSeq) maxRetSeq = num;
-            }
-          }
-          if (maxRetSeq > 0) {
-            await setSequenceFloor('return', maxRetSeq);
-          }
-        } else {
-          await offlineDb.settings.put({ key: 'seq_return', value: 0 });
-        }
-      }
-
-      // 4. Fetch Cloud Loans
-      const { data: cloudLoans, error: loansErr } = await supabase
-        .from('loans')
-        .select('*')
-        .order('created_at', { ascending: false });
-      if (!loansErr && Array.isArray(cloudLoans)) {
-        await offlineDb.settings.put({
-          key: 'cloud_loans',
-          value: cloudLoans.map((loan) => ({
-            ...loan,
-            amount: Number(loan.amount),
-            paid_amount: Number(loan.paid_amount),
-            remaining_amount: Number(loan.remaining_amount)
-          }))
-        });
-      }
-
-      // 5. Fetch Business Settings
-      const { data: cloudSettings, error: settingsErr } = await supabase
-        .from('business_settings')
-        .select('*')
-        .maybeSingle();
-      if (!settingsErr) {
-        await offlineDb.settings.put({
-          key: 'cloud_settings',
-          value: {
-            business_name: cloudSettings?.business_name || 'Aziz & Son Wholesaler',
-            address: cloudSettings?.address || '',
-            phone1: cloudSettings?.phone1 || '',
-            phone2: cloudSettings?.phone2 || '',
-            receipt_footer: cloudSettings?.receipt_footer || 'Thank you for your business!'
-          }
-        });
-      }
-    } catch {
-      // Non-fatal pull error
-    }
+  async resetShop(confirmation: string, saveBackup: (backup: unknown) => void) {
+    if (confirmation !== 'RESET AZIZ SHOP') throw new Error('Reset confirmation does not match.');
+    await this.sync();
+    if (this.lastError) throw new Error(this.lastError);
+    const reset = async () => {
+      await offlineDb.transaction('rw', offlineDb.settings, offlineDb.sync_queue, async () => {
+        if (await offlineDb.sync_queue.filter(q => q.status !== 'SYNCED').count()) throw new Error('Resolve pending transactions before resetting.');
+        await offlineDb.settings.put({ key: 'maintenance', value: true });
+      });
+      try {
+        const client = this.clientFactory();
+        if (!client) throw new Error('Cloud configuration is missing.');
+        const { data, error } = await client.rpc('shop_snapshot');
+        if (error) throw error;
+        saveBackup({ ...(await exportOfflineBackup()), cloud: data });
+        const result = await client.rpc('reset_shop_data', { p_confirmation: confirmation });
+        if (result.error) throw result.error;
+        await this.clearLocalDatabase();
+      } finally { await offlineDb.settings.delete('maintenance'); }
+    };
+    if (typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request('aziz-cloud-sync', reset);
+    else await reset();
   }
 }
-
 export const syncEngine = new SyncEngine();

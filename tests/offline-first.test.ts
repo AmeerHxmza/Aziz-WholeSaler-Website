@@ -154,6 +154,7 @@ test('Offline Database Reset: clearLocalDatabase empties all stores immediately'
   assert.ok(productsBefore > 0, 'Database should contain products before reset');
 
   // Perform full clear
+  await offlineDb.sync_queue.toCollection().modify({ status: 'SYNCED' });
   await syncEngine.clearLocalDatabase();
 
   const [productsAfter, salesAfter, returnsAfter, queueAfter] = await Promise.all([

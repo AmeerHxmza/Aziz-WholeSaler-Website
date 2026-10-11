@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useEffectEvent, useMemo, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Activity,
@@ -27,7 +27,6 @@ import {
   Settings2,
   ShoppingCart,
   Undo2,
-  Wifi,
   WifiOff,
   X
 } from 'lucide-react';
@@ -37,8 +36,11 @@ import {
   createOfflineReturn,
   recordOfflineStock,
   saveOfflineProduct,
-  deduplicateLocalProducts
+  exportOfflineBackup
 } from '@/lib/db/offline-operations';
+import { restoreOfflineBackup } from '@/lib/db/backup';
+import { tradingTotals } from '@/lib/reports';
+import { recordLocalAction } from '@/lib/db/offline-ledger';
 import { SearchableProductSelect } from '@/components/SearchableProductSelect';
 import { syncEngine, type SyncStatusState } from '@/lib/sync/sync-engine';
 import {
@@ -50,7 +52,6 @@ import {
   roundMoney
 } from '@/lib/calculations';
 import { getSupabase } from '@/lib/supabase';
-import { fetchAllRows } from '@/lib/fetch-all';
 import { createReceiptPdf } from '@/lib/receipt-pdf';
 
 type Product = {
@@ -252,6 +253,7 @@ export default function Home() {
   const [returns, setReturns] = useState<ReturnRow[]>([]);
   const [loans, setLoans] = useState<Loan[]>([]);
   const [settings, setSettings] = useState(defaultSettings);
+  const [storageStatus, setStorageStatus] = useState('Checking offline installation?');
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -295,6 +297,7 @@ export default function Home() {
     date: today()
   });
   const [returnSaleId, setReturnSaleId] = useState('');
+  const [returnRestock, setReturnRestock] = useState(true);
   const [returnReason, setReturnReason] = useState('Customer return');
   const [returnDate, setReturnDate] = useState(today());
   const [returnCart, setReturnCart] = useState<Array<{
@@ -309,6 +312,8 @@ export default function Home() {
   });
   const [settlement, setSettlement] = useState({ loanId: '', amount: '', date: today() });
   const [businessForm, setBusinessForm] = useState(settings);
+  const businessFormDirty = useRef(false);
+  function editBusinessForm(value: typeof settings) { businessFormDirty.current = true; setBusinessForm(value); }
   const [resetPhrase, setResetPhrase] = useState('');
 
   useEffect(() => {
@@ -318,12 +323,16 @@ export default function Home() {
       if (trusted) {
         const parsed = JSON.parse(trusted);
         if (parsed?.id) {
-          setSession({ id: parsed.id, email: parsed.email });
-          setAccountEmail(parsed.email || '');
+          queueMicrotask(() => { setSession({ id: parsed.id, email: parsed.email }); setAccountEmail(parsed.email || ''); });
         }
       }
     } catch {}
 
+    const onStorageStatus = (event: Event) => { const state = (event as CustomEvent<{ ready: boolean; persistent: boolean }>).detail; setStorageStatus(!state.ready ? 'Offline installation incomplete. Connect and reload.' : state.persistent ? 'Offline app ready. Persistent browser storage granted.' : 'Offline app ready. Browser persistence was not granted; keep regular backups.'); };
+    window.addEventListener('aziz-storage-status', onStorageStatus);
+    if (navigator.serviceWorker?.controller) void navigator.storage.persisted().then(persistent => setStorageStatus(persistent ? 'Offline app ready. Persistent browser storage granted.' : 'Offline app ready. Keep regular backups.'));
+    const onDataChanged = () => { void refreshFromOfflineDb(); };
+    window.addEventListener('aziz-data-changed', onDataChanged);
     const unsub = syncEngine.subscribe((state) => {
       setSyncState(state);
     });
@@ -334,29 +343,30 @@ export default function Home() {
 
     if (!supabase) return unsub;
 
-    supabase.auth.getSession().then(({ data }) => {
-      const user = data.session?.user;
-      if (user) {
-        setSession({ id: user.id, email: user.email });
-        setAccountEmail(user.email || '');
-        localStorage.setItem(
-          'aziz_pos_trusted_device',
-          JSON.stringify({ id: user.id, email: user.email, trustedAt: new Date().toISOString() })
-        );
+    const acceptUser = async (user: { id: string; email?: string }) => {
+      const owner = await offlineDb.settings.get('owner_id');
+      if (owner && owner.value !== user.id) {
+        setSession(null);
+        setError('This browser database belongs to another administrator. Sign in with its original account.');
+        return;
       }
-    }).catch(() => {
-      // Offline: network error ignored, trusted device keeps working
-    });
+      if (!owner) {
+        const { data: authorized, error: authError } = await supabase.rpc('is_shop_admin');
+        if (authError || !authorized) return;
+        await offlineDb.settings.put({ key: 'owner_id', value: user.id });
+      }
+      setSession({ id: user.id, email: user.email });
+      setAccountEmail(user.email || '');
+      localStorage.setItem('aziz_pos_trusted_device', JSON.stringify({ id: user.id, email: user.email, trustedAt: new Date().toISOString() }));
+    };
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session?.user) void acceptUser(data.session.user).catch(() => {});
+    }).catch(() => {});
 
     const { data: listener } = supabase.auth.onAuthStateChange((event, authSession) => {
       const user = authSession?.user;
       if (user) {
-        setSession({ id: user.id, email: user.email });
-        setAccountEmail(user.email || '');
-        localStorage.setItem(
-          'aziz_pos_trusted_device',
-          JSON.stringify({ id: user.id, email: user.email, trustedAt: new Date().toISOString() })
-        );
+        queueMicrotask(() => { void acceptUser(user).catch(() => {}); });
       } else if (event === 'SIGNED_OUT') {
         localStorage.removeItem('aziz_pos_trusted_device');
         setSession(null);
@@ -365,6 +375,8 @@ export default function Home() {
     });
 
     return () => {
+      window.removeEventListener('aziz-storage-status', onStorageStatus);
+      window.removeEventListener('aziz-data-changed', onDataChanged);
       unsub();
       listener.subscription.unsubscribe();
     };
@@ -372,7 +384,6 @@ export default function Home() {
 
   async function refreshFromOfflineDb() {
     try {
-      await deduplicateLocalProducts();
       const localProducts = await offlineDb.products.toArray();
       const localSales = await offlineDb.sales.orderBy('created_at').reverse().toArray();
       const localSaleItems = await offlineDb.sale_items.toArray();
@@ -381,6 +392,7 @@ export default function Home() {
 
       const localLoansRecord = await offlineDb.settings.get('cloud_loans');
       const localSettingsRecord = await offlineDb.settings.get('cloud_settings');
+      const archived = (await offlineDb.settings.get('cloud_snapshot'))?.value as { returns_legacy?: Record<string, unknown>[] } | undefined;
 
       setProducts(
         localProducts.map((p) => ({
@@ -406,7 +418,7 @@ export default function Home() {
               product_name_snapshot: si.product_name_snapshot,
               unit_snapshot: si.unit_snapshot,
               purchase_cost_snapshot: Number(si.unit_cost_snapshot || 0),
-              cost_total_snapshot: Number((si.unit_cost_snapshot || 0) * si.quantity),
+              cost_total_snapshot: roundMoney(si.line_total - si.original_profit),
               quantity: Number(si.quantity),
               unit_price: Number(si.unit_sale_price),
               line_total: Number(si.line_total)
@@ -430,77 +442,42 @@ export default function Home() {
         })
       );
 
-      setReturns(
-        localReturns.map((r) => {
-          const rItems = localReturnItems.filter((ri) => ri.return_id === r.id);
-          const firstItem = rItems[0];
-          const prod = localProducts.find((p) => p.id === (firstItem?.product_id || (r as any).product_id));
-          const sale = localSales.find((s) => s.id === r.sale_id);
-          const saleItemsForSale = localSaleItems.filter((si) => si.sale_id === r.sale_id);
-          const matchedSaleItem = saleItemsForSale.find(
-            (si) => si.product_id === (firstItem?.product_id || (r as any).product_id)
-          );
-
-          const refundTot = Number(r.refund_total || 0);
-
-          let returnedCost = 0;
-          if (rItems.length > 0) {
-            returnedCost = rItems.reduce((sum, ri) => {
-              const unitCost = Number(ri.unit_cost_snapshot || 0);
-              return sum + unitCost * Number(ri.quantity_returned || 0);
-            }, 0);
-          }
-
-          if (returnedCost === 0) {
-            const unitCost = Number(
-              matchedSaleItem?.unit_cost_snapshot ||
-                prod?.average_cost ||
-                prod?.purchase_cost ||
-                0
-            );
-            const qty = Number(firstItem?.quantity_returned || (r as any).quantity || 1);
-            if (unitCost > 0) {
-              returnedCost = roundMoney(unitCost * qty);
-            }
-          }
-
-          let profitRev = Number(r.profit_reversed || 0);
-          if (profitRev === 0 && returnedCost > 0 && refundTot >= returnedCost) {
-            profitRev = roundMoney(refundTot - returnedCost);
-          } else if (profitRev > 0 && returnedCost === 0 && refundTot >= profitRev) {
-            returnedCost = roundMoney(refundTot - profitRev);
-          }
-
-          return {
-            id: r.id,
-            bill_number: r.return_number,
-            sale_id: r.sale_id,
-            invoice_number: r.invoice_number || sale?.invoice_number || null,
-            product_id: firstItem?.product_id || (r as any).product_id || '',
-            product_name_snapshot: prod?.name || (r as any).product_name_snapshot || 'Returned item',
-            unit_snapshot: prod?.unit || (r as any).unit_snapshot || 'Units',
-            quantity: Number(firstItem?.quantity_returned || (r as any).quantity || 0),
-            refund_amount: refundTot,
-            cost_amount_snapshot: roundMoney(returnedCost),
-            profit_reversed: roundMoney(profitRev),
-            restock: true,
-            reason: r.reason || 'Customer return',
-            movement_date: r.return_date
-          };
-        })
-      );
+      const linkedReturnRows = localReturns.flatMap(r => localReturnItems.filter(ri => ri.return_id === r.id).map(ri => {
+        const original = localSaleItems.find(si => si.id === ri.sale_item_id);
+        const sale = localSales.find(sa => sa.id === r.sale_id);
+        return {
+          id: `${r.id}:${ri.id}`, bill_number: r.return_number, sale_id: r.sale_id,
+          invoice_number: r.invoice_number || sale?.invoice_number || null,
+          product_id: ri.product_id,
+          product_name_snapshot: ri.product_name_snapshot || original?.product_name_snapshot || 'Returned item',
+          unit_snapshot: ri.unit_snapshot || original?.unit_snapshot || '',
+          quantity: ri.quantity_returned, refund_amount: ri.refund_amount,
+          cost_amount_snapshot: ri.restock === false ? 0 : roundMoney(ri.refund_amount - ri.profit_reversed),
+          profit_reversed: ri.profit_reversed, restock: ri.restock !== false,
+          reason: r.reason || 'Customer return', movement_date: r.return_date
+        };
+      }));
+      const unlinkedReturns: ReturnRow[] = (archived?.returns_legacy || []).filter(r => !r.sale_id).map(r => ({
+        id: `legacy:${r.id}`, bill_number: String(r.bill_number), sale_id: null, invoice_number: null,
+        product_id: String(r.product_id), product_name_snapshot: String(r.product_name_snapshot), unit_snapshot: String(r.unit_snapshot),
+        quantity: Number(r.quantity), refund_amount: Number(r.refund_amount), restock: r.restock !== false,
+        cost_amount_snapshot: r.restock === false ? 0 : Number(r.cost_amount_snapshot),
+        profit_reversed: Number(r.refund_amount) - (r.restock === false ? 0 : Number(r.cost_amount_snapshot)),
+        reason: String(r.reason), movement_date: String(r.movement_date)
+      }));
+      setReturns([...linkedReturnRows, ...unlinkedReturns]);
 
       if (localLoansRecord?.value) {
-        setLoans(localLoansRecord.value);
+        setLoans(localLoansRecord.value as Loan[]);
       } else {
         setLoans([]);
       }
       if (localSettingsRecord?.value) {
-        setSettings(localSettingsRecord.value);
-        setBusinessForm(localSettingsRecord.value);
+        setSettings({ ...defaultSettings, ...localSettingsRecord.value as typeof defaultSettings });
+        if (!businessFormDirty.current) setBusinessForm({ ...defaultSettings, ...localSettingsRecord.value as typeof defaultSettings });
       } else {
         setSettings(defaultSettings);
-        setBusinessForm(defaultSettings);
+        if (!businessFormDirty.current) setBusinessForm(defaultSettings);
       }
     } catch (err) {
       console.warn('Error reading offline DB:', err);
@@ -561,20 +538,19 @@ export default function Home() {
       if (result.error) {
         setError(result.error.message);
       } else if (result.data?.user) {
-        localStorage.setItem(
-          'aziz_pos_trusted_device',
-          JSON.stringify({
-            id: result.data.user.id,
-            email: result.data.user.email,
-            trustedAt: new Date().toISOString()
-          })
-        );
+        const owner = await offlineDb.settings.get('owner_id');
+        if (owner && owner.value !== result.data.user.id) {
+          await supabase.auth.signOut();
+          throw new Error('Use the administrator account assigned to this browser database.');
+        }
         const { error: claimError } = await supabase.rpc('claim_shop_admin');
         if (claimError) {
           localStorage.removeItem('aziz_pos_trusted_device');
           await supabase.auth.signOut();
           setError(claimError.message);
         } else {
+          await offlineDb.settings.put({ key: 'owner_id', value: result.data.user.id });
+          localStorage.setItem('aziz_pos_trusted_device', JSON.stringify({ id: result.data.user.id, email: result.data.user.email, trustedAt: new Date().toISOString() }));
           setSession({ id: result.data.user.id, email: result.data.user.email });
           setAccountEmail(result.data.user.email || '');
         }
@@ -686,12 +662,12 @@ export default function Home() {
           (sum, item) =>
             sum +
             (Number(item.line_total) -
-              Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0)),
+              Number(item.cost_total_snapshot)),
           0
         )
       );
     }
-    return Number((s as any).original_profit || 0);
+    return Number(s.original_profit || 0);
   };
 
   const getSaleCost = (s: Sale): number => {
@@ -700,42 +676,22 @@ export default function Home() {
         s.items.reduce(
           (sum, item) =>
             sum +
-            Number(item.cost_total_snapshot || (item.purchase_cost_snapshot * item.quantity) || 0),
+            Number(item.cost_total_snapshot),
           0
         )
       );
     }
-    const prof = Number((s as any).original_profit || 0);
+    const prof = Number(s.original_profit || 0);
     return Math.max(0, roundMoney(Number(s.total ?? s.net_total) - prof));
   };
 
-  const getReturnProfitReduction = (row: ReturnRow): number => {
-    if (typeof row.profit_reversed === 'number' && row.profit_reversed > 0) {
-      return row.profit_reversed;
-    }
-    const refund = Number(row.refund_amount ?? (row as any).refund_total ?? 0);
-    const cost = row.restock ? Number(row.cost_amount_snapshot || 0) : 0;
-    if (cost > 0 && refund >= cost) {
-      return roundMoney(refund - cost);
-    }
-    return 0;
-  };
-
-  const getReturnCostRestocked = (row: ReturnRow): number => {
-    if (!row.restock) return 0;
-    if (row.cost_amount_snapshot > 0) return row.cost_amount_snapshot;
-    const refund = Number(row.refund_amount ?? (row as any).refund_total ?? 0);
-    const profitRev = Number(row.profit_reversed || 0);
-    if (refund > profitRev && profitRev > 0) {
-      return roundMoney(refund - profitRev);
-    }
-    return 0;
-  };
+  const getReturnProfitReduction = (row: ReturnRow) => row.profit_reversed;
+  const getReturnCostRestocked = (row: ReturnRow) => row.restock ? row.cost_amount_snapshot : 0;
 
   const periodRange = (() => {
     const end = today();
     if (overviewPeriod === 'TODAY') return { start: end, end, label: 'Today' };
-    if (overviewPeriod === 'WEEK') return { start: getDaysAgo(7), end, label: 'Last 7 Days' };
+    if (overviewPeriod === 'WEEK') return { start: getDaysAgo(6), end, label: 'Last 7 Days' };
     if (overviewPeriod === 'MONTH') return { start: startOfMonth(), end, label: 'This Month' };
     if (overviewPeriod === 'YEAR') return { start: startOfYear(), end, label: 'This Year' };
     return { start: '', end: '', label: 'All-Time History' };
@@ -759,24 +715,10 @@ export default function Home() {
     return d >= periodRange.start && d <= periodRange.end;
   });
 
-  const periodGrossSales = roundMoney(
-    periodSales.reduce((sum, sale) => sum + Number(sale.total ?? sale.net_total), 0)
+  const { grossSales: periodGrossSales, refunds: periodRefunds, netSales: periodNetSales, cogs: periodCogs, profit: periodProfit } = tradingTotals(
+    periodSales.map(s => ({ total: Number(s.total ?? s.net_total), cost: getSaleCost(s) })),
+    periodReturns.map(r => ({ refund: r.refund_amount, costRestocked: getReturnCostRestocked(r) }))
   );
-  const periodRefunds = roundMoney(
-    periodReturns.reduce(
-      (sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0),
-      0
-    )
-  );
-  const periodNetSales = roundMoney(Math.max(0, periodGrossSales - periodRefunds));
-  const periodGrossCogs = roundMoney(
-    periodSales.reduce((sum, sale) => sum + getSaleCost(sale), 0)
-  );
-  const periodReturnedCost = roundMoney(
-    periodReturns.reduce((sum, row) => sum + getReturnCostRestocked(row), 0)
-  );
-  const periodCogs = roundMoney(Math.max(0, periodGrossCogs - periodReturnedCost));
-  const periodProfit = roundMoney(periodNetSales - periodCogs);
   const periodMarginPct =
     periodNetSales > 0 ? ((periodProfit / periodNetSales) * 100).toFixed(1) : '0';
 
@@ -794,23 +736,10 @@ export default function Home() {
     const d = row.movement_date || (row as unknown as { return_date?: string }).return_date || (row as unknown as { created_at?: string }).created_at?.slice(0, 10);
     return d && d >= reportStart && d <= reportEnd;
   });
-  const reportGrossSales = roundMoney(
-    reportSales.reduce((sum, sale) => sum + Number(sale.total ?? sale.net_total), 0)
+  const { grossSales: reportGrossSales, refunds: reportRefunds, netSales: reportNet, profit: reportProfit } = tradingTotals(
+    reportSales.map(s => ({ total: Number(s.total ?? s.net_total), cost: getSaleCost(s) })),
+    reportReturns.map(r => ({ refund: r.refund_amount, costRestocked: getReturnCostRestocked(r) }))
   );
-  const reportRefunds = roundMoney(
-    reportReturns.reduce(
-      (sum, row) => sum + Number(row.refund_amount ?? (row as any).refund_total ?? 0),
-      0
-    )
-  );
-  const reportNet = roundMoney(Math.max(0, reportGrossSales - reportRefunds));
-  const reportGrossCogs = roundMoney(
-    reportSales.reduce((sum, sale) => sum + getSaleCost(sale), 0)
-  );
-  const reportReturnedCost = roundMoney(
-    reportReturns.reduce((sum, row) => sum + getReturnCostRestocked(row), 0)
-  );
-  const reportProfit = roundMoney(reportNet - Math.max(0, reportGrossCogs - reportReturnedCost));
   const outstandingIn = roundMoney(
     loans
       .filter((loan) => loan.type === 'GIVEN')
@@ -872,7 +801,7 @@ export default function Home() {
     setNewProduct({
       name: product.name,
       unit: product.unit,
-      purchase_cost: String(product.purchase_cost),
+      purchase_cost: product.stock > 0 || Number.isInteger(product.purchase_cost) ? String(product.purchase_cost) : '',
       sale_price: String(product.sale_price),
       minimum_stock: String(product.minimum_stock),
       opening_stock: ''
@@ -923,7 +852,7 @@ export default function Home() {
         .map((line) => ({
           productId: line.productId,
           quantity: quantity(line.quantity),
-          ...(line.unitPrice ? { unitPrice: Number(line.unitPrice) } : {})
+          ...(line.unitPrice ? { unitPrice: amount(line.unitPrice, 'Selling price') } : {})
         }));
       if (!items.length) throw new Error('Add at least one product to the bill.');
       if (new Set(items.map((item) => item.productId)).size !== items.length)
@@ -939,7 +868,7 @@ export default function Home() {
 
       // 11-digit mobile validation
       const cleanPhone = saleCustomerPhone.trim();
-      if (cleanPhone && cleanPhone.length !== 11) {
+      if (cleanPhone && !/^\d{11}$/.test(cleanPhone)) {
         throw new Error('Customer mobile number must be exactly 11 digits (e.g. 03001234567).');
       }
 
@@ -990,7 +919,7 @@ export default function Home() {
   function openQuickStock(product: Product) {
     setQuickStockProduct(product);
     setQuickStockQty('');
-    setQuickStockCost(String(product.purchase_cost || ''));
+    setQuickStockCost(Number.isInteger(product.purchase_cost) ? String(product.purchase_cost) : '');
     setError('');
     setMessage('');
   }
@@ -1035,7 +964,7 @@ export default function Home() {
         productId: stockForm.productId,
         quantity: qty,
         purchaseCost: cost,
-        movementType: stockForm.movementType as any,
+        movementType: stockForm.movementType as 'PURCHASE' | 'OPENING',
         date: stockForm.date,
         notes: stockForm.notes || null
       });
@@ -1068,16 +997,7 @@ export default function Home() {
       if (adjustForm.type === 'PHYSICAL') quantity(adjustForm.physicalCount, true);
       else quantity(adjustForm.quantity);
       await runAction(async () => {
-        const { error: rpcError } = await supabase.rpc('adjust_stock', {
-          p_product_id: adjustForm.productId,
-          p_adjustment_type: adjustForm.type,
-          p_quantity: adjustForm.type === 'PHYSICAL' ? null : Number(adjustForm.quantity),
-          p_physical_count: adjustForm.type === 'PHYSICAL' ? Number(adjustForm.physicalCount) : null,
-          p_reason: adjustForm.reason.trim(),
-          p_date: adjustForm.date,
-          p_notes: null
-        });
-        if (rpcError) throw rpcError;
+        await recordLocalAction('ADJUST_STOCK', { ...adjustForm, quantity: adjustForm.type === 'PHYSICAL' ? null : quantity(adjustForm.quantity), physicalCount: adjustForm.type === 'PHYSICAL' ? quantity(adjustForm.physicalCount, true) : null });
       }, 'Stock count reconciled and movement recorded.');
       setAdjustForm({ productId: '', type: 'PHYSICAL', quantity: '', physicalCount: '', reason: '', date: today() });
       await refreshFromOfflineDb();
@@ -1114,9 +1034,11 @@ export default function Home() {
       setBusy(true);
       const offlineResult = await createOfflineReturn({
         saleId: returnSaleId,
+        date: returnDate,
         items: validLines.map((line) => ({
           productId: line.productId,
-          quantity: quantity(line.quantity)
+          quantity: quantity(line.quantity),
+          restock: returnRestock
         })),
         reason: returnReason
       });
@@ -1140,7 +1062,8 @@ export default function Home() {
             unit: invItem?.unit_snapshot || '',
             quantity: reqQty,
             rate: rate,
-            amount: roundMoney(reqQty * rate)
+            amount: roundMoney(reqQty * rate),
+            note: returnRestock ? undefined : 'Damaged / not restocked'
           };
         })
       });
@@ -1149,6 +1072,7 @@ export default function Home() {
       setReturnCart([{ productId: '', quantity: '1' }]);
       setReturnReason('Customer return');
       setReturnDate(today());
+      setReturnRestock(true);
       setMessage(`Return ${offlineResult.returnRow.return_number} saved.`);
 
       await refreshFromOfflineDb();
@@ -1164,31 +1088,20 @@ export default function Home() {
   async function createLoan(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!supabase) return;
-    await runAction(async () => {
-      const { error: rpcError } = await supabase.rpc('create_loan', {
-        p_person_name: loanForm.person,
-        p_type: loanForm.type,
-        p_amount: Number(loanForm.amount),
-        p_date: loanForm.date,
-        p_notes: null
-      });
-      if (rpcError) throw rpcError;
+    const result = await runAction(async () => {
+      await recordLocalAction('CREATE_LOAN', { ...loanForm, amount: amount(loanForm.amount) });
     }, 'Money record saved.');
+    if (result === null) return;
     setLoanForm({ person: '', type: 'GIVEN', amount: '', date: today() });
   }
 
   async function settleLoan(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!supabase) return;
-    await runAction(async () => {
-      const { error: rpcError } = await supabase.rpc('settle_loan', {
-        p_loan_id: settlement.loanId,
-        p_amount: Number(settlement.amount),
-        p_date: settlement.date,
-        p_notes: null
-      });
-      if (rpcError) throw rpcError;
+    const result = await runAction(async () => {
+      await recordLocalAction('SETTLE_LOAN', { ...settlement, amount: amount(settlement.amount) });
     }, 'Repayment saved and balance updated.');
+    if (result === null) return;
     setSettlement({ loanId: '', amount: '', date: today() });
   }
 
@@ -1196,14 +1109,8 @@ export default function Home() {
     event.preventDefault();
     if (!supabase || !session) return;
     await runAction(async () => {
-      const { error: rpcError } = await supabase.rpc('save_business_settings', {
-        p_business_name: businessForm.business_name,
-        p_address: businessForm.address,
-        p_phone1: businessForm.phone1,
-        p_phone2: businessForm.phone2,
-        p_receipt_footer: businessForm.receipt_footer
-      });
-      if (rpcError) throw rpcError;
+      await recordLocalAction('SAVE_SETTINGS', businessForm);
+      businessFormDirty.current = false;
       setSettings(businessForm);
     }, 'Business details saved.');
   }
@@ -1218,46 +1125,13 @@ export default function Home() {
     setError('');
     setMessage('');
     try {
-      const [settingsBackup, productBackup, stockBackup, adjustmentBackup, invoiceBackup, returnSequenceBackup, salesBackup, itemsBackup, returnsBackup, loansBackup, settlementsBackup, auditBackup] = await Promise.all([
-        supabase.from('business_settings').select('*').maybeSingle(),
-        fetchAllRows((from, to) => supabase.from('products').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('stock_movements').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('stock_adjustments').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('invoice_sequences').select('*').order('year').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('return_sequences').select('*').order('year').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('sales').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('sale_items').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('returns').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('loans').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('loan_settlements').select('*').order('id').range(from, to)),
-        fetchAllRows((from, to) => supabase.from('audit_log').select('*').order('id').range(from, to))
-      ]);
-      if (settingsBackup.error) throw new Error(settingsBackup.error.message);
-      const backup = {
-        exportedAt: new Date().toISOString(),
-        business_settings: settingsBackup.data,
-        products: productBackup,
-        stock_movements: stockBackup,
-        stock_adjustments: adjustmentBackup,
-        invoice_sequences: invoiceBackup,
-        return_sequences: returnSequenceBackup,
-        sales: salesBackup,
-        sale_items: itemsBackup,
-        returns: returnsBackup,
-        loans: loansBackup,
-        loan_settlements: settlementsBackup,
-        audit_log: auditBackup
-      };
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
-      link.download = `aziz-shop-before-reset-${today()}.json`;
-      link.click();
-      window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
-      const { error: resetError } = await supabase.rpc('reset_shop_data', { p_confirmation: resetPhrase });
-      if (resetError) throw resetError;
-
-      // Wipe local IndexedDB offline tables so client mirror is completely cleared
-      await syncEngine.clearLocalDatabase();
+      await syncEngine.resetShop(resetPhrase, backup => {
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }));
+        link.download = `aziz-shop-before-reset-${today()}.json`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(link.href), 60_000);
+      });
 
       setProducts([]);
       setSales([]);
@@ -1293,7 +1167,7 @@ export default function Home() {
   function exportReport() {
     if (reportStart > reportEnd) return;
     const saleRows = reportSales.map((sale) => {
-      const saleReturns = returns.filter((r) => r.sale_id === sale.id);
+      const saleReturns = reportReturns.filter((r) => r.sale_id === sale.id);
       const saleRefunds = saleReturns.reduce((sum, r) => sum + r.refund_amount, 0);
       const billTotal = Number(sale.total ?? sale.net_total);
       const netBill = Math.max(0, billTotal - saleRefunds);
@@ -1333,8 +1207,8 @@ export default function Home() {
       ...returnSectionRows,
       [],
       ['PERIOD SUMMARY'],
-      ['Total Sales (Rs.)', reportSales.filter((s) => s.status === 'CONFIRMED').reduce((sum, s) => sum + s.net_total, 0).toFixed(2)],
-      ['Total Customer Refunds (Rs.)', reportReturns.reduce((sum, r) => sum + r.refund_amount, 0).toFixed(2)],
+      ['Total Sales (Rs.)', reportGrossSales.toFixed(2)],
+      ['Total Customer Refunds (Rs.)', reportRefunds.toFixed(2)],
       ['Net Sales (Rs.)', reportNet.toFixed(2)],
       ['Trading Profit (Rs.)', reportProfit.toFixed(2)]
     ];
@@ -1379,6 +1253,7 @@ export default function Home() {
             <h2>Sign in to your shop</h2>
             <p className="muted">Your records are private to your account.</p>
             {error && <Notice kind="error">{error}</Notice>}
+            {session && syncState.lastError && <Notice kind="error">{syncState.lastError}</Notice>}
             {message && <Notice>{message}</Notice>}
             <form onSubmit={authenticate} className="form-stack">
               <Field label="Email">
@@ -1469,7 +1344,7 @@ export default function Home() {
           </div>
           <div className="top-actions">
             {/* Real-time Sync Status Indicator */}
-            {syncState.isSyncing ? (
+            {syncState.lastError ? (<span className="sync-badge pending" title={syncState.lastError}><AlertTriangle size={13} /> Sync needs attention</span>) : syncState.isSyncing ? (
               <span className="sync-badge syncing" title="Syncing transactions with cloud database">
                 <RefreshCw className="spin" size={13} /> Syncing ({syncState.pendingCount} pending)
               </span>
@@ -1519,6 +1394,7 @@ export default function Home() {
         </header>
         <div className="content">
           {error && <Notice kind="error">{error}</Notice>}
+            {session && syncState.lastError && <Notice kind="error">{syncState.lastError}</Notice>}
           {message && <Notice>{message}</Notice>}
           {loading && (
             <div className="loading-line">
@@ -1807,8 +1683,8 @@ export default function Home() {
                                     </button>
                                     <input
                                       type="number"
-                                      min="0.001"
-                                      step="any"
+                                      min="1"
+                                      step="1"
                                       value={line.quantity}
                                       onChange={(event) =>
                                         setCart(
@@ -1842,7 +1718,7 @@ export default function Home() {
                                   <input
                                     type="number"
                                     min="0"
-                                    step="0.01"
+                                    step="1"
                                     className="pos-price-input"
                                     value={line.unitPrice}
                                     onChange={(event) =>
@@ -1967,7 +1843,7 @@ export default function Home() {
                 })()}
               </section>
               <section className="surface span-all">
-                <SectionHead title="Sales book" eyebrow="LATEST 300 BILLS" />
+                <SectionHead title="Sales book" eyebrow="COMPLETE LOCAL SALES HISTORY" />
                 <SalesTable sales={sales} returns={returns} onPrint={(sale) => setReceipt(saleReceipt(sale))} />
               </section>
             </div>
@@ -2121,7 +1997,7 @@ export default function Home() {
                         onChange={(event) => setNewProduct({ ...newProduct, unit: event.target.value })}
                         required
                         maxLength={40}
-                        disabled={Boolean(editingProduct && editingProduct.stock > 0)}
+                        disabled={Boolean(editingProduct)}
                       />
                       <datalist id="unit-suggestions">
                         <option value="Box" />
@@ -2139,8 +2015,8 @@ export default function Home() {
                       <input
                         type="number"
                         min="0"
-                        step="0.01"
-                        placeholder="0.00"
+                        step="1"
+                        placeholder="0"
                         value={newProduct.purchase_cost}
                         onChange={(event) => setNewProduct({ ...newProduct, purchase_cost: event.target.value })}
                         required
@@ -2151,8 +2027,8 @@ export default function Home() {
                       <input
                         type="number"
                         min="0"
-                        step="0.01"
-                        placeholder="0.00"
+                        step="1"
+                        placeholder="0"
                         value={newProduct.sale_price}
                         onChange={(event) => setNewProduct({ ...newProduct, sale_price: event.target.value })}
                         required
@@ -2162,7 +2038,7 @@ export default function Home() {
                       <input
                         type="number"
                         min="0"
-                        step="0.001"
+                        step="1"
                         placeholder="10"
                         value={newProduct.minimum_stock}
                         onChange={(event) => setNewProduct({ ...newProduct, minimum_stock: event.target.value })}
@@ -2173,7 +2049,7 @@ export default function Home() {
                         <input
                           type="number"
                           min="0"
-                          step="0.001"
+                          step="1"
                           placeholder="0 (Optional)"
                           value={newProduct.opening_stock}
                           onChange={(event) => setNewProduct({ ...newProduct, opening_stock: event.target.value })}
@@ -2210,6 +2086,24 @@ export default function Home() {
               </section>
             </div>
           )}
+          {tab === 'products' && <section className="surface" style={{ padding: 20, marginTop: 20 }}>
+            <h2>Inventory entries and adjustments</h2>
+            <form onSubmit={addStock} className="form-stack">
+              <Field label="Product"><select required value={stockForm.productId} onChange={e => setStockForm({ ...stockForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+              <Field label="Quantity"><input type="number" min="1" step="1" required value={stockForm.quantity} onChange={e => setStockForm({ ...stockForm, quantity: e.target.value })} /></Field>
+              <Field label="Buying price"><input type="number" min="0" step="1" required value={stockForm.purchaseCost} onChange={e => setStockForm({ ...stockForm, purchaseCost: e.target.value })} /></Field>
+              <Field label="Date"><input type="date" required value={stockForm.date} onChange={e => setStockForm({ ...stockForm, date: e.target.value })} /></Field>
+              <button className="button primary" disabled={busy}>Record stock purchase</button>
+            </form>
+            <form onSubmit={adjustStock} className="form-stack" style={{ marginTop: 24 }}>
+              <Field label="Product to reconcile"><select required value={adjustForm.productId} onChange={e => setAdjustForm({ ...adjustForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+              <Field label="Physical stock count"><input type="number" min="0" step="1" required value={adjustForm.physicalCount} onChange={e => setAdjustForm({ ...adjustForm, type: 'PHYSICAL', physicalCount: e.target.value })} /></Field>
+              <Field label="Reason"><input required value={adjustForm.reason} onChange={e => setAdjustForm({ ...adjustForm, reason: e.target.value })} /></Field>
+              <Field label="Adjustment date"><input type="date" required value={adjustForm.date} onChange={e => setAdjustForm({ ...adjustForm, date: e.target.value })} /></Field>
+              <button className="button secondary" disabled={busy}>Save physical count</button>
+            </form>
+          </section>}
+
           {tab === 'returns' && (
             <div className="page-grid">
               <section className="surface form-surface span-all">
@@ -2347,8 +2241,8 @@ export default function Home() {
                                     </button>
                                     <input
                                       type="number"
-                                      min="0.001"
-                                      step="any"
+                                      min="1"
+                                      step="1"
                                       value={line.quantity}
                                       onChange={(event) =>
                                         setReturnCart(
@@ -2464,7 +2358,13 @@ export default function Home() {
                       </div>
 
                       <div className="form-row">
-                        <Field label="Return date">
+                        <Field label="Returned goods condition">
+                            <select value={returnRestock ? 'SALEABLE' : 'DAMAGED'} onChange={e => setReturnRestock(e.target.value === 'SALEABLE')}>
+                              <option value="SALEABLE">Saleable ? add back to stock</option>
+                              <option value="DAMAGED">Damaged ? do not restock</option>
+                            </select>
+                          </Field>
+                          <Field label="Return date">
                           <input
                             type="date"
                             value={returnDate}
@@ -2483,7 +2383,7 @@ export default function Home() {
                         </Field>
                       </div>
 
-                      <button className="button primary" disabled={busy || returnTotal <= 0}>
+                      <button className="button primary" disabled={busy || !returnCart.some(line => line.productId && Number(line.quantity) > 0)}>
                         <Undo2 size={16} /> Save & Print Return Receipt
                       </button>
                     </>
@@ -2545,8 +2445,8 @@ export default function Home() {
                     <Field label="Amount (Rs.)">
                       <input
                         type="number"
-                        min="0.01"
-                        step="0.01"
+                        min="1"
+                        step="1"
                         value={loanForm.amount}
                         onChange={(event) =>
                           setLoanForm({ ...loanForm, amount: event.target.value })
@@ -2593,8 +2493,8 @@ export default function Home() {
                     <Field label="Amount (Rs.)">
                       <input
                         type="number"
-                        min="0.01"
-                        step="0.01"
+                        min="1"
+                        step="1"
                         value={settlement.amount}
                         onChange={(event) =>
                           setSettlement({ ...settlement, amount: event.target.value })
@@ -2703,7 +2603,7 @@ export default function Home() {
                       type="button"
                       className="period-pill"
                       onClick={() => {
-                        setReportStart(getDaysAgo(7));
+                        setReportStart(getDaysAgo(6));
                         setReportEnd(today());
                       }}
                     >
@@ -2765,7 +2665,7 @@ export default function Home() {
               <div className="metric-grid report-metrics">
                 <Metric
                   label="Bills"
-                  value={String(reportSales.filter((sale) => sale.status === 'CONFIRMED').length)}
+                  value={String(reportSales.length)}
                   detail={`${reportStart} to ${reportEnd}`}
                   icon={FileText}
                   tone="ink"
@@ -2850,7 +2750,7 @@ export default function Home() {
                     <input
                       value={businessForm.business_name}
                       onChange={(event) =>
-                        setBusinessForm({ ...businessForm, business_name: event.target.value })
+                        editBusinessForm({ ...businessForm, business_name: event.target.value })
                       }
                       required
                     />
@@ -2859,7 +2759,7 @@ export default function Home() {
                     <input
                       value={businessForm.address}
                       onChange={(event) =>
-                        setBusinessForm({ ...businessForm, address: event.target.value })
+                        editBusinessForm({ ...businessForm, address: event.target.value })
                       }
                     />
                   </Field>
@@ -2868,7 +2768,7 @@ export default function Home() {
                       <input
                         value={businessForm.phone1}
                         onChange={(event) =>
-                          setBusinessForm({ ...businessForm, phone1: event.target.value })
+                          editBusinessForm({ ...businessForm, phone1: event.target.value })
                         }
                       />
                     </Field>
@@ -2876,7 +2776,7 @@ export default function Home() {
                       <input
                         value={businessForm.phone2}
                         onChange={(event) =>
-                          setBusinessForm({ ...businessForm, phone2: event.target.value })
+                          editBusinessForm({ ...businessForm, phone2: event.target.value })
                         }
                       />
                     </Field>
@@ -2885,7 +2785,7 @@ export default function Home() {
                     <input
                       value={businessForm.receipt_footer}
                       onChange={(event) =>
-                        setBusinessForm({ ...businessForm, receipt_footer: event.target.value })
+                        editBusinessForm({ ...businessForm, receipt_footer: event.target.value })
                       }
                     />
                   </Field>
@@ -2930,31 +2830,7 @@ export default function Home() {
                   className="button secondary"
                   type="button"
                   onClick={async () => {
-                    const [p, s, si, r, ri, im, sq] = await Promise.all([
-                      offlineDb.products.toArray(),
-                      offlineDb.sales.toArray(),
-                      offlineDb.sale_items.toArray(),
-                      offlineDb.returns.toArray(),
-                      offlineDb.return_items.toArray(),
-                      offlineDb.inventory_movements.toArray(),
-                      offlineDb.sync_queue.toArray()
-                    ]);
-                    const content = JSON.stringify(
-                      {
-                        exportedAt: new Date().toISOString(),
-                        shop: 'Aziz & Son Wholesale',
-                        version: '1.0-offline-pwa',
-                        products: p,
-                        sales: s,
-                        sale_items: si,
-                        returns: r,
-                        return_items: ri,
-                        inventory_movements: im,
-                        sync_queue: sq
-                      },
-                      null,
-                      2
-                    );
+                    const content = JSON.stringify(await exportOfflineBackup(), null, 2);
                     const link = document.createElement('a');
                     link.href = URL.createObjectURL(
                       new Blob([content], { type: 'application/json' })
@@ -2973,14 +2849,10 @@ export default function Home() {
                     setBusy(true);
                     setError('');
                     try {
-                      await syncEngine.clearLocalDatabase();
-                      setProducts([]);
-                      setSales([]);
-                      setReturns([]);
-                      setLoans([]);
-                      await syncEngine.pullCloudState();
+                      await syncEngine.sync();
+                      if (syncEngine.getState().lastError) throw new Error(syncEngine.getState().lastError!);
                       await refreshFromOfflineDb();
-                      setMessage('Local browser storage cleared and resynced with cloud.');
+                      setMessage('Local records synchronized with cloud.');
                     } catch (e) {
                       setError(`Storage purge error: ${errorText(e)}`);
                     } finally {
@@ -2988,9 +2860,24 @@ export default function Home() {
                     }
                   }}
                 >
-                  <RefreshCw size={15} /> Purge Local Offline Cache & Resync
+                  <RefreshCw size={15} /> Refresh Local Records from Cloud
                 </button>
                 </div>
+                <Field label="Restore backup onto an empty local database">
+                  <input type="file" accept="application/json,.json" disabled={busy} onChange={async e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file || !session) return;
+                    setBusy(true);
+                    try {
+                      await restoreOfflineBackup(JSON.parse(await file.text()), session.id);
+                      await refreshFromOfflineDb();
+                      setMessage('Local backup restored. Review records before reconnecting. Cloud resets require a separate server recovery.');
+                    } catch (cause) { setError(errorText(cause)); }
+                    finally { setBusy(false); }
+                  }} />
+                </Field>
+                <p className="muted">{storageStatus}</p>
                 <div className="reset-zone">
                   <p className="eyebrow">DESTRUCTIVE ACTION</p>
                   <h3>Reset all shop data</h3>
@@ -3037,8 +2924,8 @@ export default function Home() {
                   <Field label={`New quantity received (${quickStockProduct.unit})`}>
                     <input
                       type="number"
-                      min="0.001"
-                      step="any"
+                      min="1"
+                      step="1"
                       autoFocus
                       required
                       placeholder="e.g. 50"
@@ -3050,7 +2937,7 @@ export default function Home() {
                     <input
                       type="number"
                       min="0"
-                      step="0.01"
+                      step="1"
                       required
                       value={quickStockCost}
                       onChange={(event) => setQuickStockCost(event.target.value)}
@@ -3231,19 +3118,17 @@ function SalesTable({
                 sum +
                 (Number(item.line_total) -
                   Number(
-                    item.cost_total_snapshot ||
-                      item.purchase_cost_snapshot * item.quantity ||
-                      0
+                    item.cost_total_snapshot
                   )),
               0
             )
-          : Number((sale as any).original_profit || 0)
+          : Number(sale.original_profit || 0)
       );
       const reversedProfit = roundMoney(
         saleReturns.reduce(
           (sum, r) =>
             sum +
-            (typeof r.profit_reversed === 'number' && r.profit_reversed > 0
+            (typeof r.profit_reversed === 'number'
               ? r.profit_reversed
               : r.restock && r.cost_amount_snapshot > 0 && r.refund_amount >= r.cost_amount_snapshot
                 ? r.refund_amount - r.cost_amount_snapshot
@@ -3461,7 +3346,7 @@ function SalesTable({
         <div className="empty-filter-state">
           <Search size={22} />
           <p>
-            No sales bills found matching <b>"{query}"</b>
+            No sales bills found matching <b>&quot;{query}&quot;</b>
             {statusFilter !== 'ALL' ? ` with status "${statusFilter.toLowerCase()}"` : ''}
           </p>
           <button
@@ -3481,7 +3366,6 @@ function SalesTable({
 
 function ReturnsTable({
   returns,
-  sales = [],
   onPrint
 }: {
   returns: ReturnRow[];
@@ -3626,7 +3510,7 @@ function ReturnsTable({
         <div className="empty-filter-state">
           <Search size={22} />
           <p>
-            No returns found matching <b>"{query}"</b>
+            No returns found matching <b>&quot;{query}&quot;</b>
             {conditionFilter !== 'ALL' ? ` with condition "${conditionFilter.toLowerCase()}"` : ''}
           </p>
           <button
