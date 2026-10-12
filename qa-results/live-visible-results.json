@@ -1,0 +1,72 @@
+{
+  "prefix": "QA LIVE 2026-10-12T09-02-00",
+  "origin": "http://127.0.0.1:3100",
+  "products": [
+    {
+      "id": "4ae68264-0342-4770-9881-d06836407422",
+      "name": "QA LIVE 2026-10-12T09-02-00 Packets",
+      "stock": 17,
+      "averageCost": 50
+    },
+    {
+      "id": "b6f68e6b-bf6e-4d28-a767-35c1a7e3f938",
+      "name": "QA LIVE 2026-10-12T09-02-00 Boxes",
+      "stock": 12,
+      "averageCost": 110
+    },
+    {
+      "id": "c19b6087-3db6-40ce-97e8-97c41753a2d1",
+      "name": "QA LIVE 2026-10-12T09-02-00 Crates",
+      "stock": 8,
+      "averageCost": 200
+    }
+  ],
+  "sales": [
+    {
+      "id": "228565ad-beeb-42a8-b0c1-5433257107bb",
+      "invoice": "AS-BF2805927A97-000001",
+      "date": "2026-10-12",
+      "total": 840,
+      "net": 610,
+      "profit": 250,
+      "status": "PARTIALLY_RETURNED"
+    },
+    {
+      "id": "3bf1a425-c04e-4364-9a7e-f70f52d92b43",
+      "invoice": "AS-BF2805927A97-000002",
+      "date": "2026-10-12",
+      "total": 520,
+      "net": 0,
+      "profit": 120,
+      "status": "FULLY_RETURNED"
+    }
+  ],
+  "returns": [
+    {
+      "number": "RT-BF2805927A97-000001",
+      "refund": 150,
+      "profitReversed": 40
+    },
+    {
+      "number": "RT-BF2805927A97-000002",
+      "refund": 80,
+      "profitReversed": 80
+    },
+    {
+      "number": "RT-BF2805927A97-000003",
+      "refund": 520,
+      "profitReversed": 120
+    }
+  ],
+  "totals": {
+    "gross": 1360,
+    "refunds": 750,
+    "profit": 130
+  },
+  "stages": [
+    "Authenticated browser ready",
+    "Offline service worker ready",
+    "Online product creation and changed-price purchase confirmed in Supabase; average buying cost 110.",
+    "Automatic reconnection uploaded the offline sale and both returns to real Supabase."
+  ]
+}

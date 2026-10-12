@@ -870,6 +870,62 @@ td small { display: block; max-width: 220px; overflow: hidden; margin-top: 2px; 
   width: 100%;
 }
 
+.inventory-tools {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 12px;
+  align-items: start;
+}
+
+.inventory-tool {
+  border: 1px solid #dcdfd9;
+  border-radius: 6px;
+  background: #fff;
+  min-width: 0;
+}
+
+.inventory-tool summary {
+  padding: 12px 16px;
+  cursor: pointer;
+  color: #2e3a32;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.inventory-tool summary span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  color: #687168;
+}
+
+.inventory-tool summary:focus-visible {
+  outline: 2px solid #246443;
+  outline-offset: 3px;
+}
+
+.inventory-action-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+  border-top: 1px solid #f1f3ef;
+}
+
+.inventory-action-form > :first-child,
+.inventory-action-form > button {
+  grid-column: 1 / -1;
+}
+
+.inventory-action-form input,
+.inventory-action-form select { min-width: 0; width: 100%; }
+
+@media (max-width: 640px) {
+  .inventory-tools, .inventory-action-form { grid-template-columns: minmax(0, 1fr); }
+}
+
 .product-quick-form {
   background: #ffffff;
   border: 1px solid #dcdfd9;

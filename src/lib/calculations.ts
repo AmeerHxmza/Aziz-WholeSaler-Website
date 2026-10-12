@@ -51,7 +51,14 @@ export function lineAmount(qty: number, rate: number): number {
 
 export function averageCost(stock: number, cost: number, added: number, addedCost: number): number {
   if (stock + added <= 0) throw new Error('Average cost needs a positive stock quantity.');
-  return Math.round(((stock * cost + added * addedCost) / (stock + added)) * 1_000_000) / 1_000_000;
+  // Match PostgreSQL NUMERIC half-up rounding without binary floating-point
+  // errors at the sixth decimal. Retain legacy quantity precision on imports.
+  const existingUnits = BigInt(Math.round(stock * 1000));
+  const addedUnits = BigInt(Math.round(added * 1000));
+  const totalUnits = existingUnits + addedUnits;
+  const totalCost = existingUnits * BigInt(Math.round(cost * 1_000_000))
+    + addedUnits * BigInt(Math.round(addedCost * 1_000_000));
+  return Number((totalCost + totalUnits / BigInt(2)) / totalUnits) / 1_000_000;
 }
 
 export function businessDate(value: string): string {

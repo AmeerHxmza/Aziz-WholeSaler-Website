@@ -1,0 +1,33 @@
+{
+  "products": 120,
+  "purchases": 240,
+  "invoices": 600,
+  "saleLines": 1800,
+  "returns": 240,
+  "returnLines": 720,
+  "physicalCounts": 12,
+  "loans": 20,
+  "repayments": 20,
+  "queuedOperations": 1252,
+  "replayedOperations": 126,
+  "finalStock": 7708,
+  "expected": {
+    "grossSales": 1291103,
+    "grossCogs": 1239683.7,
+    "refunds": 256162,
+    "returnedCost": 159452.71,
+    "netSales": 1034941,
+    "cogs": 1080230.99,
+    "profit": -45289.99
+  },
+  "actual": {
+    "grossSales": 1291103,
+    "grossCogs": 1239683.7,
+    "refunds": 256162,
+    "returnedCost": 159452.71,
+    "netSales": 1034941,
+    "cogs": 1080230.99,
+    "profit": -45289.99
+  },
+  "elapsedSeconds": 25.082
+}

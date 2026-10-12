@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Generated production offline asset manifest
 /public/sw-assets.js
+
+# Private live QA browser profiles and recovery journals
+/.qa-live/

@@ -20,7 +20,7 @@ try {
   await page.getByRole('heading', { name: 'Aziz & Son Wholesaler', exact: true }).waitFor();
   assert.ok(await page.evaluate(() => Boolean(navigator.serviceWorker.controller)));
   await context.setOffline(true);
-  await page.getByRole('button', { name: 'Products', exact: true }).click();
+  await page.getByRole('button', { name: /^Products/ }).click();
   await page.locator('#product-form').waitFor();
   const form = page.locator('#product-form');
   // Use the actual product form and its visible labels.
@@ -58,8 +58,8 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin);
   await page.getByRole('heading', { name: 'Aziz & Son Wholesaler', exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Products', exact: true }).click();
-  await page.getByText('Offline browser test', { exact:true }).first().waitFor();
+  await page.getByRole('button', { name: /^Products/ }).click();
+  await page.locator('table').getByText('Offline browser test', { exact:true }).waitFor();
   assert.deepEqual(errors, []);
   console.log('PASS: installed shell, product, sale, return and queue survive a browser restart with all networking disabled.');
 } finally { await context.close(); }

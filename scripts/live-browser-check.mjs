@@ -27,14 +27,14 @@ try {
   }, [cloud.products.length, cloud.sales.length, cloud.returns.length]);
   console.log('PASS: live login, migration 004 snapshot, and local mirror counts agree.');
   for (const section of ['Products', 'New sale', 'Returns']) {
-    await page.getByRole('button', { name: section, exact: true }).click();
+    await page.getByRole('button', { name: section === 'Products' ? /^Products/ : section, exact: section !== 'Products' }).click();
   }
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.reload();
   await context.setOffline(true);
   await page.reload();
   await page.getByRole('heading', { name: 'Aziz & Son Wholesaler', exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Products', exact: true }).click();
+  await page.getByRole('button', { name: /^Products/ }).click();
   await page.locator('#product-form').waitFor();
   assert.deepEqual(errors, []);
   console.log('PASS: authenticated website reopens offline with cached shop data and no JavaScript errors.');

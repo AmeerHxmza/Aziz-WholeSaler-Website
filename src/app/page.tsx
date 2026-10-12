@@ -1946,6 +1946,29 @@ export default function Home() {
                   </div>
                 </div>
 
+                <div className="inventory-tools" aria-label="Inventory actions">
+                  <details className="inventory-tool">
+                    <summary>Add stock<span>Record a purchase for an existing product</span></summary>
+            <form onSubmit={addStock} className="inventory-action-form">
+              <Field label="Product"><select required value={stockForm.productId} onChange={e => setStockForm({ ...stockForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+              <Field label="Quantity"><input type="number" min="1" step="1" required value={stockForm.quantity} onChange={e => setStockForm({ ...stockForm, quantity: e.target.value })} /></Field>
+              <Field label="Buying price"><input type="number" min="0" step="1" required value={stockForm.purchaseCost} onChange={e => setStockForm({ ...stockForm, purchaseCost: e.target.value })} /></Field>
+              <Field label="Date"><input type="date" required value={stockForm.date} onChange={e => setStockForm({ ...stockForm, date: e.target.value })} /></Field>
+              <button className="button primary" disabled={busy}>Record stock purchase</button>
+            </form>
+                  </details>
+                  <details className="inventory-tool">
+                    <summary>Reconcile stock<span>Update inventory after a physical count</span></summary>
+            <form onSubmit={adjustStock} className="inventory-action-form">
+              <Field label="Product to reconcile"><select required value={adjustForm.productId} onChange={e => setAdjustForm({ ...adjustForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
+              <Field label="Physical stock count"><input type="number" min="0" step="1" required value={adjustForm.physicalCount} onChange={e => setAdjustForm({ ...adjustForm, type: 'PHYSICAL', physicalCount: e.target.value })} /></Field>
+              <Field label="Reason"><input required value={adjustForm.reason} onChange={e => setAdjustForm({ ...adjustForm, reason: e.target.value })} /></Field>
+              <Field label="Adjustment date"><input type="date" required value={adjustForm.date} onChange={e => setAdjustForm({ ...adjustForm, date: e.target.value })} /></Field>
+              <button className="button secondary" disabled={busy}>Save physical count</button>
+            </form>
+                  </details>
+                </div>
+
                 <div id="product-form" className={`product-quick-form ${editingProduct ? 'editing' : ''}`}>
                   <div className="product-form-header">
                     <span className="product-form-title">
@@ -1990,26 +2013,20 @@ export default function Home() {
                       />
                     </Field>
                     <Field label="Unit">
-                      <input
-                        list="unit-suggestions"
+                      <select
                         value={newProduct.unit}
-                        placeholder="e.g. Box"
                         onChange={(event) => setNewProduct({ ...newProduct, unit: event.target.value })}
                         required
-                        maxLength={40}
                         disabled={Boolean(editingProduct)}
-                      />
-                      <datalist id="unit-suggestions">
-                        <option value="Box" />
-                        <option value="Piece" />
-                        <option value="Kg" />
-                        <option value="Carton" />
-                        <option value="Packet" />
-                        <option value="Bag" />
-                        <option value="Dozen" />
-                        <option value="Roll" />
-                        <option value="Liter" />
-                      </datalist>
+                      >
+                        {Array.from(new Set([
+                          'Box', 'Crate', 'Packet', 'Piece', 'Carton', 'Bag',
+                          'Dozen', 'Roll', 'Bottle', 'Can', 'Bundle', 'Kg', 'Liter',
+                          ...products.map(product => product.unit), newProduct.unit
+                        ])).filter(Boolean).map(unit => (
+                          <option key={unit} value={unit}>{unit}</option>
+                        ))}
+                      </select>
                     </Field>
                     <Field label="Buying rate (Rs.)">
                       <input
@@ -2086,23 +2103,7 @@ export default function Home() {
               </section>
             </div>
           )}
-          {tab === 'products' && <section className="surface" style={{ padding: 20, marginTop: 20 }}>
-            <h2>Inventory entries and adjustments</h2>
-            <form onSubmit={addStock} className="form-stack">
-              <Field label="Product"><select required value={stockForm.productId} onChange={e => setStockForm({ ...stockForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
-              <Field label="Quantity"><input type="number" min="1" step="1" required value={stockForm.quantity} onChange={e => setStockForm({ ...stockForm, quantity: e.target.value })} /></Field>
-              <Field label="Buying price"><input type="number" min="0" step="1" required value={stockForm.purchaseCost} onChange={e => setStockForm({ ...stockForm, purchaseCost: e.target.value })} /></Field>
-              <Field label="Date"><input type="date" required value={stockForm.date} onChange={e => setStockForm({ ...stockForm, date: e.target.value })} /></Field>
-              <button className="button primary" disabled={busy}>Record stock purchase</button>
-            </form>
-            <form onSubmit={adjustStock} className="form-stack" style={{ marginTop: 24 }}>
-              <Field label="Product to reconcile"><select required value={adjustForm.productId} onChange={e => setAdjustForm({ ...adjustForm, productId: e.target.value })}><option value="">Choose product</option>{products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></Field>
-              <Field label="Physical stock count"><input type="number" min="0" step="1" required value={adjustForm.physicalCount} onChange={e => setAdjustForm({ ...adjustForm, type: 'PHYSICAL', physicalCount: e.target.value })} /></Field>
-              <Field label="Reason"><input required value={adjustForm.reason} onChange={e => setAdjustForm({ ...adjustForm, reason: e.target.value })} /></Field>
-              <Field label="Adjustment date"><input type="date" required value={adjustForm.date} onChange={e => setAdjustForm({ ...adjustForm, date: e.target.value })} /></Field>
-              <button className="button secondary" disabled={busy}>Save physical count</button>
-            </form>
-          </section>}
+
 
           {tab === 'returns' && (
             <div className="page-grid">
